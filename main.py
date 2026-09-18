@@ -45,24 +45,50 @@ class HealthHandler(BaseHTTPRequestHandler):
             import asyncio
             async def run_dbg():
                 results = {}
-                # 1. TikWM
-                try:
-                    from curl_cffi.requests import AsyncSession
-                    async with AsyncSession(impersonate="chrome120") as s:
-                        r = await s.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}, timeout=10)
-                        results["tikwm"] = {"status": r.status_code, "body": r.text[:300]}
-                except Exception as e:
-                    results["tikwm"] = {"error": str(e)}
+                import httpx
+                from curl_cffi.requests import AsyncSession
                 
-                # 2. Lovetik
+                # 1. TikWM GET
                 try:
-                    import httpx
-                    async with httpx.AsyncClient(timeout=10) as cx:
-                        r = await cx.post("https://lovetik.com/api/analyze/ajax", data={"query": url})
-                        results["lovetik"] = {"status": r.status_code, "body": r.text[:300]}
+                    async with AsyncSession(impersonate="chrome120") as s:
+                        r = await s.get(f"https://www.tikwm.com/api/?url={url}&hd=1", headers={"Referer": "https://www.tikwm.com/"}, timeout=8)
+                        results["tikwm_get"] = {"status": r.status_code, "code": r.json().get("code") if r.status_code==200 else r.text[:100]}
                 except Exception as e:
-                    results["lovetik"] = {"error": str(e)}
-                    
+                    results["tikwm_get"] = {"error": str(e)}
+
+                # 2. TiklyDown
+                try:
+                    async with httpx.AsyncClient(timeout=8) as cx:
+                        r = await cx.get(f"https://api.tiklydown.eu.org/api/download?url={url}")
+                        results["tiklydown"] = {"status": r.status_code, "code": r.json().get("status") if r.status_code==200 else r.text[:100]}
+                except Exception as e:
+                    results["tiklydown"] = {"error": str(e)}
+
+                # 3. TikTok Official Mobile Feed API
+                try:
+                    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as cx:
+                        # resolve redirect
+                        r_red = await cx.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                        dest = str(r_red.url)
+                        import re
+                        m = re.search(r"/(?:video|photo)/(\d+)", dest)
+                        if m:
+                            vid = m.group(1)
+                            mob_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={vid}"
+                            r_mob = await cx.get(mob_url, headers={"User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 7.1.2; es_ES; SM-G988N; Build/NRD90M;tt-ok/3.12.13.1)"})
+                            data = r_mob.json()
+                            aweme = (data.get("aweme_list") or [{}])[0]
+                            results["tiktok_mobile"] = {
+                                "status": r_mob.status_code,
+                                "has_video": bool(aweme.get("video")),
+                                "has_images": bool(aweme.get("image_post_info")),
+                                "desc": aweme.get("desc", "")[:40]
+                            }
+                        else:
+                            results["tiktok_mobile"] = {"error": f"could not extract vid from {dest}"}
+                except Exception as e:
+                    results["tiktok_mobile"] = {"error": str(e)}
+
                 return results
 
             res = asyncio.run(run_dbg())
