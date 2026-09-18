@@ -1,25 +1,14 @@
 import os
 import threading
-import traceback
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
-
-LAST_ERROR = "No errors. Bot is running."
-BOT_STATUS = "initializing"
+import bot
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'application/json; charset=utf-8')
         self.end_headers()
-        res = {
-            "status": "ok",
-            "bot": "TokSpy",
-            "bot_status": BOT_STATUS,
-            "last_error": LAST_ERROR
-        }
-        self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+        self.wfile.write(b'{"status": "ok", "bot": "TokSpy", "state": "running"}')
 
     def do_HEAD(self):
         self.send_response(200)
@@ -34,25 +23,11 @@ def run_http_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
-def start_bot():
-    global LAST_ERROR, BOT_STATUS
-    while True:
-        try:
-            print("Importing and starting bot...", flush=True)
-            BOT_STATUS = "starting"
-            import bot
-            BOT_STATUS = "running"
-            bot.main()
-        except Exception as e:
-            BOT_STATUS = "error"
-            LAST_ERROR = traceback.format_exc()
-            print("BOT CRASHED:\n", LAST_ERROR, flush=True)
-            print("Retrying in 10 seconds...", flush=True)
-            time.sleep(10)
-
 if __name__ == "__main__":
-    t_bot = threading.Thread(target=start_bot, daemon=True)
-    t_bot.start()
+    # Start HTTP server in daemon thread
+    t = threading.Thread(target=run_http_server, daemon=True)
+    t.start()
 
-    # Keep HTTP server in main thread
-    run_http_server()
+    # Run Telegram bot in MAIN thread (required for Unix signals)
+    print("Starting Telegram bot in main thread...", flush=True)
+    bot.main()
