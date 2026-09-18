@@ -17,3 +17,5 @@ numpy>=1.26.0
 Pillow>=10.0.0
 arabic-reshaper>=3.0.0
 python-bidi>=0.4.2
+
+certifi>=2024.2.2

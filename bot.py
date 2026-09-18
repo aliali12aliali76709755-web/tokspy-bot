@@ -56,7 +56,8 @@ FREE_LIMIT = int(os.environ.get("FREE_DAILY_LIMIT", "15"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 log = logging.getLogger("tiktokbot")
 
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
+import certifi
+client = AsyncIOMotorClient(os.environ["MONGO_URL"], tlsCAFile=certifi.where())
 db = client[os.environ["DB_NAME"]]
 
 # ------------------------- reply keyboard -------------------------
