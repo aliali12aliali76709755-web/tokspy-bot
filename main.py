@@ -7,6 +7,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import urllib.parse
 import json
+import re
 
 LOG_BUFFER = deque(maxlen=200)
 
@@ -45,30 +46,27 @@ class HealthHandler(BaseHTTPRequestHandler):
             import asyncio
             async def run_dbg():
                 results = {}
-                from curl_cffi.requests import AsyncSession
-                
-                targets = ["chrome124", "safari17_0", "edge101", "tor"]
-                for t in targets:
-                    try:
-                        async with AsyncSession(impersonate=t) as s:
-                            r = await s.get(f"https://www.tikwm.com/api/?url={url}&hd=1", timeout=8)
-                            results[t] = {"status": r.status_code, "body": r.text[:100]}
-                    except Exception as e:
-                        results[t] = {"error": str(e)}
-
-                # Also test rapidapi or open tiktok apis
                 import httpx
-                for endpoint in [
-                    f"https://tiktok-download-without-watermark.p.rapidapi.com/analysis?url={url}",
-                    f"https://api.vkrdown.com/tiktok?url={url}",
-                    f"https://www.tikwm.com/api/?url={url}"
-                ]:
-                    try:
-                        async with httpx.AsyncClient(timeout=8) as cx:
-                            r = await cx.get(endpoint, headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1"})
-                            results[endpoint[:30]] = {"status": r.status_code, "body": r.text[:100]}
-                    except Exception as e:
-                        results[endpoint[:30]] = {"error": str(e)}
+                
+                # Test SSSTik
+                try:
+                    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cx:
+                        r_page = await cx.get("https://ssstik.io/en", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                        tt_m = re.search(r'data-tt="([^"]+)"', r_page.text)
+                        tt = tt_m.group(1) if tt_m else "0"
+                        r_post = await cx.post(
+                            "https://ssstik.io/abc?url=dl",
+                            data={"id": url, "locale": "en", "tt": tt},
+                            headers={"hx-request": "true", "hx-target": "target", "hx-current-url": "https://ssstik.io/en", "User-Agent": "Mozilla/5.0"}
+                        )
+                        links = re.findall(r'href="([^"]+)"', r_post.text)
+                        results["ssstik"] = {
+                            "status": r_post.status_code,
+                            "links_count": len(links),
+                            "first_link": links[0][:60] if links else None
+                        }
+                except Exception as e:
+                    results["ssstik"] = {"error": str(e)}
 
                 return results
 
