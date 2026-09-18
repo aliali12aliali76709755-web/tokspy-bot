@@ -398,15 +398,17 @@ async def download_video(url: str) -> dict | None:
                 stats = item_struct.get("stats", {})
                 author = item_struct.get("author", {})
                 music_info = item_struct.get("music", {})
+                author_n = "".join(ch for ch in str(author.get("nickname", "")) if ch not in ("\ufffc", "\ufffd")).strip() or author.get("uniqueId", author_uid)
+                t_desc = "".join(ch for ch in str(item_struct.get("desc", "")) if ch not in ("\ufffc", "\ufffd")).strip()
                 return {
                     "id": str(item_struct.get("id") or post_id or ""),
-                    "title": item_struct.get("desc") or "",
+                    "title": t_desc,
                     "play": None,
                     "video_path": None,
                     "images": image_urls,
                     "music": music_info.get("playUrl"),
                     "music_info": {"play": music_info.get("playUrl"), "title": music_info.get("title")},
-                    "author": {"unique_id": author.get("uniqueId", author_uid), "nickname": author.get("nickname", author_uid)},
+                    "author": {"unique_id": author.get("uniqueId", author_uid), "nickname": author_n},
                     "create_time": int(item_struct.get("createTime") or 0) if item_struct.get("createTime") else None,
                     "play_count": stats.get("playCount", 0),
                     "digg_count": stats.get("diggCount", 0),
@@ -416,25 +418,56 @@ async def download_video(url: str) -> dict | None:
                     "download_count": 0,
                 }
 
-        # Method B: SSSTik scraper for photo slides
+        # Method B: SSSTik scraper for photo slides + yt-dlp metadata
         ss = await _scrape_ssstik(url)
         if ss and ss.get("images"):
+            ts = None
+            views = 0
+            likes = 0
+            comments = 0
+            shares = 0
+            post_title = ss.get("title") or ""
+
+            if post_id and author_uid:
+                try:
+                    import yt_dlp
+                    loop = asyncio.get_event_loop()
+                    def _get_meta():
+                        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+                            return ydl.extract_info(f"https://www.tiktok.com/@{author_uid}/video/{post_id}", download=False)
+                    meta = await loop.run_in_executor(None, _get_meta)
+                    if meta:
+                        ts = meta.get("timestamp")
+                        views = meta.get("view_count") or 0
+                        likes = meta.get("like_count") or 0
+                        comments = meta.get("comment_count") or 0
+                        shares = meta.get("repost_count") or 0
+                        desc = meta.get("description")
+                        if desc and not desc.startswith("TikTok video #"):
+                            post_title = desc
+                except Exception as e:
+                    log.warning("yt-dlp photo metadata failed: %s", e)
+
             prof = await fetch_profile(author_uid) if author_uid else None
             author_nick = (prof.get("nickname") if prof else "") or author_uid
+            # Clean non-printable/OBJ character \ufffc
+            author_nick = "".join(ch for ch in str(author_nick) if ch not in ("\ufffc", "\ufffd")).strip() or author_uid
+            post_title = "".join(ch for ch in str(post_title) if ch not in ("\ufffc", "\ufffd")).strip()
+
             return {
                 "id": post_id or "",
-                "title": ss.get("title") or "",
+                "title": post_title,
                 "play": None,
                 "video_path": None,
                 "images": ss["images"],
                 "music": ss.get("music"),
                 "music_info": {"play": ss.get("music")},
                 "author": {"unique_id": author_uid, "nickname": author_nick},
-                "create_time": None,
-                "play_count": 0,
-                "digg_count": 0,
-                "comment_count": 0,
-                "share_count": 0,
+                "create_time": ts,
+                "play_count": views,
+                "digg_count": likes,
+                "comment_count": comments,
+                "share_count": shares,
                 "collect_count": 0,
                 "download_count": 0,
             }

@@ -385,11 +385,20 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         date_str = "—"
         time_str = "—"
 
-    nickname = data.get("author", {}).get("nickname", "")
-    if not nickname and prof:
-        nickname = prof.get("nickname", "")
-    
-    bio = data.get("title") or "—"
+    def _clean_str(s: str) -> str:
+        if not s:
+            return ""
+        return "".join(ch for ch in str(s) if ch not in ("\ufffc", "\ufffd") and not (0x200B <= ord(ch) <= 0x200F)).strip()
+
+    raw_nick = _clean_str(data.get("author", {}).get("nickname", ""))
+    if not raw_nick and prof:
+        raw_nick = _clean_str(prof.get("nickname", ""))
+    nickname = raw_nick or uid or "—"
+
+    raw_bio = data.get("title") or ""
+    if raw_bio.startswith("TikTok video #") or raw_bio.startswith("TikTok photo #"):
+        raw_bio = ""
+    bio = _clean_str(raw_bio) or "—"
     acc_id = prof.get("id", "—") if prof else "—"
 
     # caption: strictly as user requested
