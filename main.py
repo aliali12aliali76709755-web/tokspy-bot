@@ -45,49 +45,30 @@ class HealthHandler(BaseHTTPRequestHandler):
             import asyncio
             async def run_dbg():
                 results = {}
-                import httpx
                 from curl_cffi.requests import AsyncSession
                 
-                # 1. TikWM GET
-                try:
-                    async with AsyncSession(impersonate="chrome120") as s:
-                        r = await s.get(f"https://www.tikwm.com/api/?url={url}&hd=1", headers={"Referer": "https://www.tikwm.com/"}, timeout=8)
-                        results["tikwm_get"] = {"status": r.status_code, "code": r.json().get("code") if r.status_code==200 else r.text[:100]}
-                except Exception as e:
-                    results["tikwm_get"] = {"error": str(e)}
+                targets = ["chrome124", "safari17_0", "edge101", "tor"]
+                for t in targets:
+                    try:
+                        async with AsyncSession(impersonate=t) as s:
+                            r = await s.get(f"https://www.tikwm.com/api/?url={url}&hd=1", timeout=8)
+                            results[t] = {"status": r.status_code, "body": r.text[:100]}
+                    except Exception as e:
+                        results[t] = {"error": str(e)}
 
-                # 2. TiklyDown
-                try:
-                    async with httpx.AsyncClient(timeout=8) as cx:
-                        r = await cx.get(f"https://api.tiklydown.eu.org/api/download?url={url}")
-                        results["tiklydown"] = {"status": r.status_code, "code": r.json().get("status") if r.status_code==200 else r.text[:100]}
-                except Exception as e:
-                    results["tiklydown"] = {"error": str(e)}
-
-                # 3. TikTok Official Mobile Feed API
-                try:
-                    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as cx:
-                        # resolve redirect
-                        r_red = await cx.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                        dest = str(r_red.url)
-                        import re
-                        m = re.search(r"/(?:video|photo)/(\d+)", dest)
-                        if m:
-                            vid = m.group(1)
-                            mob_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={vid}"
-                            r_mob = await cx.get(mob_url, headers={"User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 7.1.2; es_ES; SM-G988N; Build/NRD90M;tt-ok/3.12.13.1)"})
-                            data = r_mob.json()
-                            aweme = (data.get("aweme_list") or [{}])[0]
-                            results["tiktok_mobile"] = {
-                                "status": r_mob.status_code,
-                                "has_video": bool(aweme.get("video")),
-                                "has_images": bool(aweme.get("image_post_info")),
-                                "desc": aweme.get("desc", "")[:40]
-                            }
-                        else:
-                            results["tiktok_mobile"] = {"error": f"could not extract vid from {dest}"}
-                except Exception as e:
-                    results["tiktok_mobile"] = {"error": str(e)}
+                # Also test rapidapi or open tiktok apis
+                import httpx
+                for endpoint in [
+                    f"https://tiktok-download-without-watermark.p.rapidapi.com/analysis?url={url}",
+                    f"https://api.vkrdown.com/tiktok?url={url}",
+                    f"https://www.tikwm.com/api/?url={url}"
+                ]:
+                    try:
+                        async with httpx.AsyncClient(timeout=8) as cx:
+                            r = await cx.get(endpoint, headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1"})
+                            results[endpoint[:30]] = {"status": r.status_code, "body": r.text[:100]}
+                    except Exception as e:
+                        results[endpoint[:30]] = {"error": str(e)}
 
                 return results
 
@@ -112,7 +93,6 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_http_server():
     port = int(os.environ.get("PORT", "10000"))
-    print(f"Starting health check server on port {port}...", flush=True)
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
@@ -135,5 +115,4 @@ if __name__ == "__main__":
     t_ping = threading.Thread(target=keep_alive, daemon=True)
     t_ping.start()
 
-    print("Starting Telegram bot in main thread...", flush=True)
     bot.main()
