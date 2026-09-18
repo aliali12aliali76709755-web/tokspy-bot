@@ -95,6 +95,32 @@ def now():
     return datetime.now(timezone.utc)
 
 
+async def _download_bytes(url: str) -> bytes | None:
+    """Download binary content (photo or video) with proper TikTok headers."""
+    if not url or not isinstance(url, str) or not url.startswith("http"):
+        return None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+        "Referer": "https://www.tiktok.com/",
+    }
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession(impersonate="safari15_5") as s:
+            r = await s.get(url, headers=headers, timeout=20)
+            if r.status_code == 200 and r.content:
+                return r.content
+    except Exception:
+        pass
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cx:
+            r = await cx.get(url, headers=headers)
+            if r.status_code == 200 and r.content:
+                return r.content
+    except Exception:
+        pass
+    return None
+
+
 # ------------------------- db helpers -------------------------
 async def get_user(tid: int, tg=None) -> dict:
     u = await db.users.find_one({"telegram_id": tid})
@@ -333,7 +359,7 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         await context.bot.delete_message(tid, wait.message_id)
     except Exception:
         pass
-    if not data or (not data.get("play") and not data.get("images")):
+    if not data or (not data.get("play") and not data.get("images") and not data.get("video_path")):
         await update.effective_message.reply_text("❌ تعذّر تحميل المنشور. تأكد من الرابط.")
         return
 
@@ -421,15 +447,43 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
             )
         return
 
+    video_path = data.get("video_path")
     try:
-        await context.bot.send_video(
-            tid, video=data["play"], caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
-        )
-    except Exception:
-        await update.effective_message.reply_text(
-            cap + f"\n\n🔗 رابط التحميل:\n{data['play']}",
-            parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True,
-        )
+        if video_path and os.path.exists(video_path):
+            with open(video_path, "rb") as vf:
+                await context.bot.send_video(
+                    tid, video=vf, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
+                )
+        elif data.get("play"):
+            try:
+                await context.bot.send_video(
+                    tid, video=data["play"], caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
+                )
+            except Exception:
+                b = await _download_bytes(data["play"])
+                if b:
+                    await context.bot.send_video(
+                        tid, video=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
+                    )
+                else:
+                    raise
+        else:
+            raise ValueError("No video source available")
+    except Exception as e:
+        log.warning("send_video error: %s", e)
+        if data.get("play"):
+            await update.effective_message.reply_text(
+                cap + f"\n\n🔗 رابط التحميل:\n{data['play']}",
+                parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True,
+            )
+        else:
+            await update.effective_message.reply_text("❌ تعذّر إرسال الفيديو.")
+    finally:
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception:
+                pass
 
 
 # ------------------------- text router -------------------------

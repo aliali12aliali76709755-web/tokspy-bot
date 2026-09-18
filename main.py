@@ -44,31 +44,33 @@ class HealthHandler(BaseHTTPRequestHandler):
             url = qs.get("url", ["https://vm.tiktok.com/ZN86HLRrs/"])[0]
             
             import asyncio
+            import tiktok_service as tk
             async def run_dbg():
-                results = {}
-                import httpx
-                
-                # Test SSSTik
                 try:
-                    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cx:
-                        r_page = await cx.get("https://ssstik.io/en", headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                        tt_m = re.search(r'data-tt="([^"]+)"', r_page.text)
-                        tt = tt_m.group(1) if tt_m else "0"
-                        r_post = await cx.post(
-                            "https://ssstik.io/abc?url=dl",
-                            data={"id": url, "locale": "en", "tt": tt},
-                            headers={"hx-request": "true", "hx-target": "target", "hx-current-url": "https://ssstik.io/en", "User-Agent": "Mozilla/5.0"}
-                        )
-                        links = re.findall(r'href="([^"]+)"', r_post.text)
-                        results["ssstik"] = {
-                            "status": r_post.status_code,
-                            "links_count": len(links),
-                            "first_link": links[0][:60] if links else None
+                    data = await tk.download_video(url)
+                    if data:
+                        vpath = data.get("video_path")
+                        has_vpath = bool(vpath and os.path.exists(vpath))
+                        if vpath and os.path.exists(vpath):
+                            try:
+                                os.remove(vpath)
+                            except Exception:
+                                pass
+                        return {
+                            "ok": True,
+                            "id": data.get("id"),
+                            "title": data.get("title"),
+                            "author": data.get("author"),
+                            "images_count": len(data.get("images", [])),
+                            "first_image": data["images"][0][:80] if data.get("images") else None,
+                            "has_video_file": has_vpath,
+                            "play": data.get("play")[:80] if data.get("play") else None,
+                            "play_count": data.get("play_count"),
+                            "digg_count": data.get("digg_count"),
                         }
+                    return {"ok": False, "error": "tk.download_video returned None"}
                 except Exception as e:
-                    results["ssstik"] = {"error": str(e)}
-
-                return results
+                    return {"ok": False, "error": str(e)}
 
             res = asyncio.run(run_dbg())
             self.send_response(200)
