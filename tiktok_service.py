@@ -266,6 +266,74 @@ async def fetch_posts(username: str, count: int = 6):
         return None
 
 
+def _b64_decode(token: str) -> str:
+    try:
+        token = token.rstrip("/").split("/")[-1]
+        missing = len(token) % 4
+        if missing:
+            token += "=" * (4 - missing)
+        import base64
+        decoded = base64.b64decode(token).decode("utf-8", "ignore")
+        if decoded.startswith("http"):
+            return decoded
+    except Exception:
+        pass
+    return ""
+
+
+async def _scrape_ssstik(url: str) -> dict | None:
+    """Scrape photo images / media from SSSTik."""
+    try:
+        from bs4 import BeautifulSoup
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession(impersonate="chrome110") as s:
+            r_init = await s.get("https://ssstik.io/en", timeout=10)
+            tt = re.search(r'data-tt="([^"]+)"', r_init.text)
+            tt_val = tt.group(1) if tt else "0"
+            r_post = await s.post(
+                "https://ssstik.io/abc?url=dl",
+                data={"id": url, "locale": "en", "tt": tt_val},
+                headers={"hx-request": "true", "hx-target": "target", "hx-current-url": "https://ssstik.io/en"},
+                timeout=15
+            )
+            soup = BeautifulSoup(r_post.text, "html.parser")
+            
+            t_el = soup.select_one(".maintext, p.maintext, h2")
+            title = t_el.get_text(strip=True) if t_el else ""
+            
+            raw_links = []
+            for a in soup.find_all("a"):
+                href = a.get("href", "")
+                if "tikcdn.io/ssstik/" in href and "/m/" not in href and "/a/" not in href and "css" not in href:
+                    raw_links.append(href)
+            
+            images = []
+            for link in raw_links:
+                dec = _b64_decode(link)
+                if dec and dec not in images:
+                    images.append(dec)
+                elif link and link not in images:
+                    images.append(link)
+
+            music_url = None
+            for a in soup.find_all("a"):
+                href = a.get("href", "")
+                if "/m/" in href:
+                    dec = _b64_decode(href)
+                    music_url = dec or href
+                    break
+                    
+            if images:
+                return {
+                    "title": title,
+                    "images": images,
+                    "music": music_url,
+                }
+    except Exception as e:
+        log.warning("SSSTik scraper error: %s", e)
+    return None
+
+
 async def download_video(url: str) -> dict | None:
     """Download TikTok post (video or photo slideshow) with reliable multi-engine fallback.
     Returns normalized dictionary with metadata, play/images/video_path.
@@ -274,26 +342,36 @@ async def download_video(url: str) -> dict | None:
     if not url:
         return None
 
-    # Step 1: Resolve redirects & scrape itemStruct directly from TikTok
-    item_struct = None
+    # Step 1: Detect if photo and resolve redirects
+    is_photo = ("/photo/" in url.lower())
     real_url = url
-    is_photo = False
+    post_id = ""
+    author_uid = ""
+
     mobile_headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    item_struct = None
     try:
         from curl_cffi.requests import AsyncSession
         async with AsyncSession(impersonate="safari15_5") as s:
-            r = await s.get(url, headers=mobile_headers, allow_redirects=True, timeout=12)
+            r = await s.get(url, headers=mobile_headers, allow_redirects=True, timeout=10)
             real_url = r.url.split("?")[0]
-            if "/photo/" in real_url:
+            if "/photo/" in real_url.lower():
                 is_photo = True
+            
+            m_id = re.search(r'/(?:video|photo)/(\d+)', real_url)
+            if m_id:
+                post_id = m_id.group(1)
+            m_u = re.search(r'tiktok\.com/@([\w\.\-]+)', real_url)
+            if m_u:
+                author_uid = m_u.group(1)
 
-            # If redirected, fetch clean url to avoid interstitial
+            # Check if page has api-data JSON
             if "?" in r.url or real_url != url:
-                r2 = await s.get(real_url, headers=mobile_headers, timeout=12)
+                r2 = await s.get(real_url, headers=mobile_headers, timeout=10)
                 html = r2.text
             else:
                 html = r.text
@@ -305,50 +383,72 @@ async def download_video(url: str) -> dict | None:
     except Exception as e:
         log.warning("Direct scrape error for %s: %s", url, e)
 
-    # If it's a photo post (or has photo album)
-    if item_struct and (is_photo or item_struct.get("imagePost", {}).get("images")):
-        image_post = item_struct.get("imagePost", {})
-        raw_images = image_post.get("images", [])
-        image_urls = []
-        for img in raw_images:
-            u_list = img.get("imageURL", {}).get("urlList", [])
-            if u_list:
-                image_urls.append(u_list[0])
+    # Step 2: If photo post, extract images via direct scrape or SSSTik
+    if is_photo or (item_struct and item_struct.get("imagePost", {}).get("images")):
+        # Method A: Direct itemStruct images
+        if item_struct and item_struct.get("imagePost", {}).get("images"):
+            image_post = item_struct.get("imagePost", {})
+            raw_images = image_post.get("images", [])
+            image_urls = []
+            for img in raw_images:
+                u_list = img.get("imageURL", {}).get("urlList", [])
+                if u_list:
+                    image_urls.append(u_list[0])
+            if image_urls:
+                stats = item_struct.get("stats", {})
+                author = item_struct.get("author", {})
+                music_info = item_struct.get("music", {})
+                return {
+                    "id": str(item_struct.get("id") or post_id or ""),
+                    "title": item_struct.get("desc") or "",
+                    "play": None,
+                    "video_path": None,
+                    "images": image_urls,
+                    "music": music_info.get("playUrl"),
+                    "music_info": {"play": music_info.get("playUrl"), "title": music_info.get("title")},
+                    "author": {"unique_id": author.get("uniqueId", author_uid), "nickname": author.get("nickname", author_uid)},
+                    "create_time": int(item_struct.get("createTime") or 0) if item_struct.get("createTime") else None,
+                    "play_count": stats.get("playCount", 0),
+                    "digg_count": stats.get("diggCount", 0),
+                    "comment_count": stats.get("commentCount", 0),
+                    "share_count": stats.get("shareCount", 0),
+                    "collect_count": stats.get("collectCount", 0),
+                    "download_count": 0,
+                }
 
-        stats = item_struct.get("stats", {})
-        author = item_struct.get("author", {})
-        music_info = item_struct.get("music", {})
-        return {
-            "id": str(item_struct.get("id") or ""),
-            "title": item_struct.get("desc") or "",
-            "play": None,
-            "video_path": None,
-            "images": image_urls,
-            "music": music_info.get("playUrl"),
-            "music_info": {
-                "play": music_info.get("playUrl"),
-                "title": music_info.get("title"),
-                "author": music_info.get("authorName"),
-            },
-            "author": {
-                "unique_id": author.get("uniqueId", ""),
-                "nickname": author.get("nickname", ""),
-            },
-            "create_time": int(item_struct.get("createTime") or 0) if item_struct.get("createTime") else None,
-            "play_count": stats.get("playCount", 0),
-            "digg_count": stats.get("diggCount", 0),
-            "comment_count": stats.get("commentCount", 0),
-            "share_count": stats.get("shareCount", 0),
-            "collect_count": stats.get("collectCount", 0),
-            "download_count": 0,
-        }
+        # Method B: SSSTik scraper for photo slides
+        ss = await _scrape_ssstik(url)
+        if ss and ss.get("images"):
+            prof = await fetch_profile(author_uid) if author_uid else None
+            author_nick = (prof.get("nickname") if prof else "") or author_uid
+            return {
+                "id": post_id or "",
+                "title": ss.get("title") or "",
+                "play": None,
+                "video_path": None,
+                "images": ss["images"],
+                "music": ss.get("music"),
+                "music_info": {"play": ss.get("music")},
+                "author": {"unique_id": author_uid, "nickname": author_nick},
+                "create_time": None,
+                "play_count": 0,
+                "digg_count": 0,
+                "comment_count": 0,
+                "share_count": 0,
+                "collect_count": 0,
+                "download_count": 0,
+            }
 
-    # Step 2: For videos, download via yt-dlp to obtain direct MP4 and rich metadata
+    # Step 3: For videos (and photo fallback), download via yt-dlp
     try:
         import yt_dlp
         loop = asyncio.get_event_loop()
         tmp_dir = tempfile.mkdtemp(prefix="tokspy_")
         out_tmpl = os.path.join(tmp_dir, "%(id)s.%(ext)s")
+
+        ytdl_target = real_url
+        if is_photo and post_id and author_uid:
+            ytdl_target = f"https://www.tiktok.com/@{author_uid}/video/{post_id}"
 
         def _download_ytdl():
             ydl_opts = {
@@ -358,25 +458,25 @@ async def download_video(url: str) -> dict | None:
                 "format": "bestvideo+bestaudio/best",
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = ydl.extract_info(ytdl_target, download=True)
                 fpath = ydl.prepare_filename(info)
                 return info, fpath
 
         info, video_path = await loop.run_in_executor(None, _download_ytdl)
         if os.path.exists(video_path):
-            author_uid = (item_struct.get("author", {}).get("uniqueId") if item_struct else "") or info.get("uploader_id") or info.get("uploader") or ""
-            author_nick = (item_struct.get("author", {}).get("nickname") if item_struct else "") or info.get("uploader") or ""
+            uid = (item_struct.get("author", {}).get("uniqueId") if item_struct else "") or author_uid or info.get("uploader_id") or info.get("uploader") or ""
+            author_nick = (item_struct.get("author", {}).get("nickname") if item_struct else "") or info.get("uploader") or uid
             stats = item_struct.get("stats", {}) if item_struct else {}
 
             return {
-                "id": str(info.get("id") or (item_struct.get("id") if item_struct else "") or ""),
+                "id": str(info.get("id") or post_id or (item_struct.get("id") if item_struct else "") or ""),
                 "title": (item_struct.get("desc") if item_struct else "") or info.get("title") or info.get("description") or "",
                 "play": info.get("url"),
                 "video_path": video_path,
                 "images": [],
                 "music": None,
                 "author": {
-                    "unique_id": author_uid,
+                    "unique_id": uid,
                     "nickname": author_nick,
                 },
                 "create_time": (int(item_struct.get("createTime") or 0) if item_struct else None) or info.get("timestamp"),
@@ -391,7 +491,7 @@ async def download_video(url: str) -> dict | None:
     except Exception as e:
         log.warning("yt-dlp download failed for %s: %s", url, e)
 
-    # Step 3: If yt-dlp failed, check if item_struct gave video URLs
+    # Step 4: If yt-dlp failed, check direct item_struct video URLs
     if item_struct:
         video = item_struct.get("video", {})
         play_url = video.get("playAddr") or video.get("downloadAddr")
@@ -414,8 +514,8 @@ async def download_video(url: str) -> dict | None:
                     "author": music_info.get("authorName"),
                 },
                 "author": {
-                    "unique_id": author.get("uniqueId", ""),
-                    "nickname": author.get("nickname", ""),
+                    "unique_id": author.get("uniqueId", author_uid),
+                    "nickname": author.get("nickname", author_uid),
                 },
                 "create_time": int(item_struct.get("createTime") or 0) if item_struct.get("createTime") else None,
                 "duration": video.get("duration"),
@@ -427,14 +527,14 @@ async def download_video(url: str) -> dict | None:
                 "download_count": 0,
             }
 
-    # Step 4: tikwm fallback
+    # Step 5: tikwm fallback
     try:
         from curl_cffi.requests import AsyncSession
         async with AsyncSession(impersonate="chrome120") as s:
             r = await s.post(
                 "https://www.tikwm.com/api/",
                 data={"url": url, "hd": "1"},
-                timeout=15,
+                timeout=12,
             )
             if r.status_code == 200:
                 j = r.json()

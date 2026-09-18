@@ -20,3 +20,4 @@ python-bidi>=0.4.2
 
 certifi>=2024.2.2
 yt-dlp>=2026.8.0
+beautifulsoup4>=4.12.0
