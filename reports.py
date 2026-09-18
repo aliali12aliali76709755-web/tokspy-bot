@@ -24,8 +24,11 @@ ASSETS = os.path.join(os.path.dirname(__file__), "assets")
 FONT = os.path.join(ASSETS, "Cairo.ttf")
 OUT = tempfile.gettempdir()
 
-font_manager.fontManager.addfont(FONT)
-_MPL_FONT = font_manager.FontProperties(fname=FONT)
+if os.path.exists(FONT):
+    font_manager.fontManager.addfont(FONT)
+    _MPL_FONT = font_manager.FontProperties(fname=FONT)
+else:
+    _MPL_FONT = font_manager.FontProperties()
 
 BG_TOP = (13, 17, 30)
 BG_BOT = (28, 20, 48)
