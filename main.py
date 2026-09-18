@@ -5,8 +5,9 @@ import urllib.request
 import logging
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import urllib.parse
+import json
 
-# In-memory log buffer
 LOG_BUFFER = deque(maxlen=200)
 
 class BufferHandler(logging.Handler):
@@ -17,7 +18,6 @@ class BufferHandler(logging.Handler):
         except Exception:
             pass
 
-# Configure root logger to capture all bot and telegram logs
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 buf_handler = BufferHandler()
@@ -25,15 +25,51 @@ buf_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname
 root_logger.addHandler(buf_handler)
 
 import bot
+import tiktok_service as tk
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/logs":
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/logs":
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
             logs_text = "\n".join(LOG_BUFFER)
             self.wfile.write(logs_text.encode('utf-8'))
+            return
+
+        if parsed.path == "/debug_dl":
+            qs = urllib.parse.parse_qs(parsed.query)
+            url = qs.get("url", ["https://vm.tiktok.com/ZN86HLRrs/"])[0]
+            
+            import asyncio
+            async def run_dbg():
+                results = {}
+                # 1. TikWM
+                try:
+                    from curl_cffi.requests import AsyncSession
+                    async with AsyncSession(impersonate="chrome120") as s:
+                        r = await s.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}, timeout=10)
+                        results["tikwm"] = {"status": r.status_code, "body": r.text[:300]}
+                except Exception as e:
+                    results["tikwm"] = {"error": str(e)}
+                
+                # 2. Lovetik
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=10) as cx:
+                        r = await cx.post("https://lovetik.com/api/analyze/ajax", data={"query": url})
+                        results["lovetik"] = {"status": r.status_code, "body": r.text[:300]}
+                except Exception as e:
+                    results["lovetik"] = {"error": str(e)}
+                    
+                return results
+
+            res = asyncio.run(run_dbg())
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
             return
 
         self.send_response(200)
@@ -55,7 +91,6 @@ def run_http_server():
     server.serve_forever()
 
 def keep_alive():
-    """Pings the public Render URL every 10 minutes through the external router to prevent sleep."""
     url = "https://tokspy-telegram-bot.onrender.com"
     time.sleep(120)
     while True:
