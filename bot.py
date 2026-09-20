@@ -76,13 +76,10 @@ MAIN_KB = InlineKeyboardMarkup([
     ],
     [
         InlineKeyboardButton("الحسابات المراقبة", callback_data="main_mon", icon_custom_emoji_id="6037397706505195857"),
-        InlineKeyboardButton("الاشتراك المميز (VIP)", callback_data="main_vip", icon_custom_emoji_id="6163729951859148826")
+        InlineKeyboardButton("دعوة الأصدقاء", callback_data="main_invite", icon_custom_emoji_id="6048721430730773527")
     ],
     [
-        InlineKeyboardButton("دعوة الأصدقاء", callback_data="main_invite", icon_custom_emoji_id="6048721430730773527"),
-        InlineKeyboardButton("مساعدة", callback_data="main_help", icon_custom_emoji_id="5415705360822446110")
-    ],
-    [
+        InlineKeyboardButton("مساعدة", callback_data="main_help", icon_custom_emoji_id="5415705360822446110"),
         InlineKeyboardButton("تنبيه هام", callback_data="main_notice", icon_custom_emoji_id="6100496806217517918")
     ]
 ])
@@ -185,17 +182,10 @@ async def _extend_vip(tid: int, days: int):
 
 
 async def check_free_quota(tid: int) -> bool:
-    if await is_vip(tid):
-        return True
-    today = now().strftime("%Y-%m-%d")
-    u = await db.users.find_one({"telegram_id": tid}) or {}
-    day = u.get("search_day")
-    count = u.get("day_count", 0) if day == today else 0
-    if count >= FREE_LIMIT:
-        return False
+    # All features are completely free and unlimited for all users
     await db.users.update_one(
         {"telegram_id": tid},
-        {"$set": {"search_day": today, "day_count": count + 1}, "$inc": {"searches": 1}},
+        {"$inc": {"searches": 1}},
         upsert=True,
     )
     return True
@@ -266,10 +256,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode=ParseMode.HTML,
                     )
                     if invites % 20 == 0:
-                        await grant_vip(ref, 30)
                         await context.bot.send_message(
                             ref,
-                            "🎉 <b>مبروك!</b> لقد اكتمل عدد دعواتك (20 صديقاً) وحصلت على <b>شهر VIP مجاناً!</b>",
+                            f"🎉 <b>رائع جداً!</b> لقد دعوت {invites} صديقاً لاستخدام البوت، شكراً لدعمك ومشاركتك للبوت! ❤️",
                             parse_mode=ParseMode.HTML
                         )
                 except Exception:
@@ -572,69 +561,26 @@ async def show_notice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await target.reply_text(txt, parse_mode=ParseMode.HTML)
 
 
-# ------------------------- VIP -------------------------
+# ------------------------- Free Service Info -------------------------
 async def show_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
-        "⭐ <b>الاشتراك المميز (VIP)</b>\n"
+        "🎉 <b>البوت مجاني بالكامل 100%!</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "احصل على كافة مميزات البوت بلا حدود عبر الاشتراك بإحدى الباقات التالية:\n\n"
-        "🎁 <b>اربح شهراً مجاناً!</b>\n"
-        "قم بدعوة 20 صديقاً لاستخدام البوت عبر رابطك الخاص، واحصل على اشتراك VIP لمدة شهر كامل مجاناً!\n\n"
-        "اختر الباقة المناسبة لك للاشتراك عبر نجوم تلغرام:"
+        "جميع مميزات البوت متاحة لجميع المستخدمين بلا أي قيود وبدون أي اشتراك مدفوع:\n\n"
+        "• 🔍 بحث فوري وجلب بطاقة الحساب الكاملة\n"
+        "• 🎬 تحميل الفيديوهات والصور بأعلى دقة وبدون علامة مائية\n"
+        "• 🔔 مراقبة الحسابات والتنبيهات المباشرة والتلقائية\n"
+        "• ⚖️ مقارنة الحسابات وتحليل معدل النمو والتفاعل\n"
+        "• 📄 استخراج تقارير PDF احترافية متكاملة\n"
+        "• 🛡 فحص وكشف الحسابات المنتحلة وتنبيهات الانتحال\n\n"
+        "استمتع باستخدام كافة الميزات بلا حدود! ❤️"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⭐ اشتراك شهر (99 نجمة)", callback_data="buy:month1", icon_custom_emoji_id="6163729951859148826")],
-        [InlineKeyboardButton("⭐ اشتراك 3 أشهر (250 نجمة)", callback_data="buy:month3", icon_custom_emoji_id="6163729951859148826")],
-        [InlineKeyboardButton("⭐ اشتراك 6 أشهر (450 نجمة)", callback_data="buy:month6", icon_custom_emoji_id="6163729951859148826")],
-        [InlineKeyboardButton("⭐ اشتراك سنة (899 نجمة)", callback_data="buy:year1", icon_custom_emoji_id="6163729951859148826")],
+        [InlineKeyboardButton("🔍 بحث عن حساب", callback_data="main_search"),
+         InlineKeyboardButton("🎬 تحميل فيديو", callback_data="main_dl")],
     ])
     target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
-
-
-async def send_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: str):
-    tid = update.effective_user.id
-    plans = {
-        "month1": ("VIP شهري", 99, "اشتراك VIP لمدة شهر واحد."),
-        "month3": ("VIP 3 أشهر", 250, "اشتراك VIP لمدة 3 أشهر."),
-        "month6": ("VIP 6 أشهر", 450, "اشتراك VIP لمدة 6 أشهر."),
-        "year1": ("VIP سنة كاملة", 899, "اشتراك VIP لمدة سنة كاملة."),
-    }
-    if plan not in plans: return
-    title, price, desc = plans[plan]
-    await context.bot.send_invoice(
-        chat_id=tid,
-        title=title,
-        description=desc,
-        payload=f"vip_{plan}",
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(title, price)],
-    )
-
-
-async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.pre_checkout_query.answer(ok=True)
-
-
-async def on_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sp = update.message.successful_payment
-    tid = update.effective_user.id
-    payload = sp.invoice_payload
-    days_map = {"vip_month1": 30, "vip_month3": 90, "vip_month6": 180, "vip_year1": 365}
-    days = days_map.get(payload, 30)
-    await grant_vip(tid, days)
-    await db.payments.insert_one({
-        "telegram_id": tid,
-        "charge_id": sp.telegram_payment_charge_id,
-        "stars": sp.total_amount,
-        "plan": payload,
-        "ts": now().isoformat(),
-    })
-    await update.effective_message.reply_text(
-        "🎉 <b>تم تفعيل اشتراك VIP بنجاح!</b>\nاستمتع بكل الميزات المميزة ⭐",
-        parse_mode=ParseMode.HTML,
-    )
 
 
 # ------------------------- monitors -------------------------
@@ -669,7 +615,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if action == "buy":
-        return await send_invoice(update, context, arg)
+        return await show_vip(update, context)
 
     if action == "add_mon_prompt":
         return await q.message.reply_text("🔍 أرسل اليوزر أو الرابط للحساب ليتم مراقبته:")
@@ -791,30 +737,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "high":
             return await send_highlights(q, context, arg)
         if action == "compare":
-            if not await is_vip(tid):
-                return await _vip_gate(q)
             context.user_data["await"] = "compare"
             context.user_data["compare_a"] = arg
             return await q.message.reply_text(f"⚖️ أرسل اسم الحساب الثاني لمقارنته مع @{arg}:")
 
         if action == "monitor":
-            if not await is_vip(tid):
-                return await _vip_gate(q)
             return await add_monitor(q, tid, arg)
 
         if action == "growth":
-            if not await is_vip(tid):
-                return await _vip_gate(q)
             return await show_growth(q, arg)
 
         if action == "pdf":
-            if not await is_vip(tid):
-                return await _vip_gate(q)
             return await send_pdf_report(q, context, arg)
 
         if action == "imp":
-            if not await is_vip(tid):
-                return await _vip_gate(q)
             return await impersonation_scan(q, context, arg)
 
         # img / level / er / refresh need a fresh profile
@@ -846,8 +782,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.edit_message_text(f"🗑 تم إيقاف مراقبة @{arg}.")
 
     if action == "impmon":
-        if not await is_vip(tid):
-            return await _vip_gate(q)
         p = await tk.fetch_profile(arg)
         if not p:
             return await q.message.reply_text("❌ تعذّر جلب الحساب.")
@@ -1184,12 +1118,11 @@ async def show_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invites = u.get("invites", 0)
     rem = 20 - (invites % 20)
     txt = (
-        "🎁 <b>نظام الدعوات والمكافآت</b>\n"
+        "🎁 <b>دعوة الأصدقاء ومشاركة البوت</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "اربح <b>شهر كامل من اشتراك VIP مجاناً!</b> 👑\n\n"
-        "كل ما عليك هو دعوة <b>20 صديقاً</b> لاستخدام البوت عبر رابطك الخاص. البوت سيعلمك تلقائياً بمجرد اكتمال العدد ويفعل اشتراكك فوراً.\n\n"
-        f"📊 عدد الأشخاص الذين دعوتهم: <b>{invites}</b>\n"
-        f"⏳ متبقي لك للحصول على الشهر المجاني: <b>{rem}</b> أصدقاء\n\n"
+        "🎉 <b>البوت مجاني 100% لجميع المستخدمين بلا حدود وبدون أي اشتراك مدفوع!</b>\n\n"
+        "شارك البوت مع أصدقائك ليستفيدوا من جميع الميزات (البحث عن الحسابات، تحميل الفيديوهات والصور بدون علامة مائية، المراقبة اللحظية، والتقارير الاحترافية):\n\n"
+        f"📊 عدد الأشخاص الذين دعوتهم: <b>{invites}</b>\n\n"
         "👇 <b>رابط الدعوة الخاص بك:</b>\n"
         f"<code>{link}</code>"
     )
@@ -1578,9 +1511,7 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="adm:stats"),
-         InlineKeyboardButton("⭐ مشتركو VIP", callback_data="adm:vip")],
-        [InlineKeyboardButton("📢 إذاعة جماعية", callback_data="adm:broadcast"),
-         InlineKeyboardButton("🎁 منح VIP", callback_data="adm:grant")],
+         InlineKeyboardButton("📢 إذاعة جماعية", callback_data="adm:broadcast")],
         [InlineKeyboardButton("🔒 الاشتراك الإجباري", callback_data="adm:forced")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="adm:home")],
     ])
@@ -1610,12 +1541,10 @@ async def admin_stats_text() -> str:
     return (
         "🛠 <b>لوحة التحكم — الإحصائيات</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"👥 إجمالي المستخدمين: <b>{total}</b>\n"
+        f"👥 إجمالي المستخدمين: <b>{total}</b> (البوت مجاني بالكامل 🎉)\n"
         f"🆕 اليوم: {period['اليوم']} | الأسبوع: {period['الأسبوع']}\n"
         f"🗓 الشهر: {period['الشهر']} | السنة: {period['السنة']}\n\n"
-        f"⭐ مشتركو VIP: <b>{vips}</b>\n"
-        f"🔔 حسابات تحت المراقبة: {mons}\n"
-        f"💰 إجمالي النجوم: {stars} ⭐ ({npay} عملية)"
+        f"🔔 حسابات تحت المراقبة: {mons}"
     )
 
 
@@ -1680,7 +1609,6 @@ async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "تشغيل البوت"),
         BotCommand("help", "شرح البوت وكل الميزات"),
-        BotCommand("vip", "مزايا البوت (مجاني بالكامل)"),
         BotCommand("invite", "دعوة الأصدقاء ومشاركة البوت"),
         BotCommand("agency", "لوحة الوكالة"),
         BotCommand("dev", "تواصل مع المطوّر"),
@@ -1696,8 +1624,6 @@ def main():
     app.add_handler(CommandHandler("dev", dev_cmd))
     app.add_handler(CommandHandler("invite", show_invite))
     app.add_handler(CommandHandler("agency", agency_cmd))
-    app.add_handler(PreCheckoutQueryHandler(precheckout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_paid))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
 
