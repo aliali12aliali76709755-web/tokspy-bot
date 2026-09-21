@@ -305,13 +305,11 @@ async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎧 <b>قسم الدعم الفني والمساعدة</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "إذا واجهتك أي مشكلة أثناء استخدام البوت، أو كان لديك أي استفسار أو اقتراح، "
-        "يمكنك التواصل مباشرة مع حساب الدعم الفني:\n\n"
-        f"👤 <b>حساب الدعم:</b> @{SUPPORT_USERNAME}\n"
-        f"🆔 <b>الآيدي:</b> <code>{SUPPORT_ID}</code>\n\n"
+        "يمكنك التواصل مباشرة مع الدعم الفني.\n\n"
         "👇 اضغط على الزر أدناه لمراسلة الدعم الفني مباشرة:"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💬 مراسلة الدعم الفني (@{SUPPORT_USERNAME})", url=SUPPORT_URL)],
+        [InlineKeyboardButton("💬 مراسلة الدعم الفني", url=SUPPORT_URL)],
         [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="main_back_start")]
     ])
     if update.callback_query:
@@ -345,11 +343,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🛡 كشف المقلّدين — الحسابات التي تنتحل الاسم.\n\n"
         "🎁 <b>الدعوات:</b> شارك البوت مع أصدقائك لدعمنا.\n"
         "🏢 <b>لوحة الوكالة:</b> راقب عملاءك مع تقرير أسبوعي.\n\n"
-        "✨ جميع ميزات البوت مفتوحة ومجانية 100% بلا أي حدود! ✨\n\n"
-        f"🎧 <b>الدعم الفني:</b> @{SUPPORT_USERNAME}"
+        "✨ جميع ميزات البوت مفتوحة ومجانية 100% بلا أي حدود! ✨"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🎧 تواصل مع الدعم الفني (@{SUPPORT_USERNAME})", url=SUPPORT_URL)],
+        [InlineKeyboardButton("💬 مراسلة الدعم الفني", url=SUPPORT_URL)],
         [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="main_back_start")]
     ])
     if update.callback_query:
