@@ -44,9 +44,12 @@ ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "6641619062"))
+SUPPORT_ID = 6641619062
+SUPPORT_USERNAME = "DRK450"
+SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-DEVELOPER = os.environ.get("DEVELOPER", "").lstrip("@")
+DEVELOPER = os.environ.get("DEVELOPER", "DRK450").lstrip("@")
 ADMIN_SESSIONS: set[int] = set()
 PRICE_MONTH = int(os.environ.get("VIP_PRICE_MONTH", "250"))
 PRICE_LIFE = int(os.environ.get("VIP_PRICE_LIFETIME", "1500"))
@@ -79,7 +82,10 @@ MAIN_KB = InlineKeyboardMarkup([
         InlineKeyboardButton("دعوة الأصدقاء", callback_data="main_invite", icon_custom_emoji_id="6048721430730773527")
     ],
     [
-        InlineKeyboardButton("مساعدة", callback_data="main_help", icon_custom_emoji_id="5415705360822446110"),
+        InlineKeyboardButton("🎧 الدعم الفني", callback_data="main_support"),
+        InlineKeyboardButton("مساعدة", callback_data="main_help", icon_custom_emoji_id="5415705360822446110")
+    ],
+    [
         InlineKeyboardButton("تنبيه هام", callback_data="main_notice", icon_custom_emoji_id="6100496806217517918")
     ]
 ])
@@ -237,8 +243,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     existing = await db.users.find_one({"telegram_id": tid})
     await get_user(tid, update.effective_user)
     # referral handling
-    if not existing and context.args:
-        arg = context.args[0]
+    args = getattr(context, "args", None)
+    if not existing and args:
+        arg = args[0]
         if arg.startswith("ref_"):
             try:
                 ref = int(arg[4:])
@@ -275,12 +282,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✨ <b>مميزات البوت المجانية بالكامل:</b>\n"
         "• <tg-emoji emoji-id=\"5179271173568988234\">📈</tg-emoji> تتبّع نمو الحسابات والمتابعين\n"
         "• 🔔 مراقبة لحظية وتنبيهات التغيير\n"
-        "• ⚖️ مقارنة الحسابات والتقارير وتحميل الصور\n\n"
+        "• ⚖️ مقارنة الحسابات والتقارير وتحميل الصور\n"
+        "• 🎧 دعم فني متواصل لمساعدتك\n\n"
     )
-    from telegram import ReplyKeyboardRemove
-    rem_msg = await update.effective_message.reply_text("🔄 جاري التحديث...", reply_markup=ReplyKeyboardRemove())
-    await rem_msg.delete()
+    if update.callback_query:
+        try:
+            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
+            return
+        except Exception:
+            pass
+    try:
+        from telegram import ReplyKeyboardRemove
+        rem_msg = await update.effective_message.reply_text("🔄 جاري التحديث...", reply_markup=ReplyKeyboardRemove())
+        await rem_msg.delete()
+    except Exception:
+        pass
     await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
+
+
+async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (
+        "🎧 <b>قسم الدعم الفني والمساعدة</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "إذا واجهتك أي مشكلة أثناء استخدام البوت، أو كان لديك أي استفسار أو اقتراح، "
+        "يمكنك التواصل مباشرة مع حساب الدعم الفني:\n\n"
+        f"👤 <b>حساب الدعم:</b> @{SUPPORT_USERNAME}\n"
+        f"🆔 <b>الآيدي:</b> <code>{SUPPORT_ID}</code>\n\n"
+        "👇 اضغط على الزر أدناه لمراسلة الدعم الفني مباشرة:"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💬 مراسلة الدعم الفني (@{SUPPORT_USERNAME})", url=SUPPORT_URL)],
+        [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="main_back_start")]
+    ])
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+        except Exception:
+            pass
+        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -303,20 +346,26 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎁 <b>الدعوات:</b> شارك البوت مع أصدقائك لدعمنا.\n"
         "🏢 <b>لوحة الوكالة:</b> راقب عملاءك مع تقرير أسبوعي.\n\n"
         "✨ جميع ميزات البوت مفتوحة ومجانية 100% بلا أي حدود! ✨\n\n"
-        f"👨‍💻 المطوّر / الدعم: @{DEVELOPER}"
+        f"🎧 <b>الدعم الفني:</b> @{SUPPORT_USERNAME}"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👨‍💻 تواصل مع المطوّر", url=f"https://t.me/{DEVELOPER}")],
+        [InlineKeyboardButton(f"🎧 تواصل مع الدعم الفني (@{SUPPORT_USERNAME})", url=SUPPORT_URL)],
+        [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="main_back_start")]
     ])
-    await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+            return
+        except Exception:
+            pass
+        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def dev_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        f"👨‍💻 <b>المطوّر وصاحب البوت:</b> @{DEVELOPER}\nللتواصل والاقتراحات والدعم.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 تواصل الآن", url=f"https://t.me/{DEVELOPER}")]]),
-    )
+    await support_cmd(update, context)
 
 
 # ------------------------- core: show profile -------------------------
@@ -522,8 +571,13 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_subscribed(update, context):
         return
 
-    # ---- inline-keyboard main menu handling ----
-    pass # handled in on_callback
+    # ---- quick text navigation triggers ----
+    if text.lower() in ("بدء", "start", "/start", "القائمة الرئيسية", "الرئيسية", "رجوع"):
+        return await start(update, context)
+    if text.lower() in ("الدعم الفني", "الدعم", "دعم", "/support", "support"):
+        return await support_cmd(update, context)
+    if text.lower() in ("مساعدة", "المساعدة", "/help", "help"):
+        return await help_cmd(update, context)
 
     if tk.is_video_link(text):
         return await do_download(update, context, text)
@@ -631,6 +685,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_vip(update, context)
     if action == "main_invite":
         return await show_invite(update, context)
+    if action == "main_support":
+        return await support_cmd(update, context)
+    if action == "main_back_start":
+        if q:
+            await q.answer()
+        return await start(update, context)
     if action == "main_help":
         return await help_cmd(update, context)
     if action == "main_notice":
@@ -1607,11 +1667,11 @@ async def _do_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, txt: str
 # ------------------------- main -------------------------
 async def _post_init(app: Application):
     await app.bot.set_my_commands([
-        BotCommand("start", "تشغيل البوت"),
+        BotCommand("start", "بدء تشغيل البوت / القائمة الرئيسية"),
+        BotCommand("support", "الدعم الفني"),
         BotCommand("help", "شرح البوت وكل الميزات"),
         BotCommand("invite", "دعوة الأصدقاء ومشاركة البوت"),
         BotCommand("agency", "لوحة الوكالة"),
-        BotCommand("dev", "تواصل مع المطوّر"),
     ])
     log.info("bot commands menu set")
 
@@ -1619,9 +1679,10 @@ async def _post_init(app: Application):
 def main():
     app: Application = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("vip", show_vip))
-    app.add_handler(CommandHandler("dev", dev_cmd))
+    app.add_handler(CommandHandler("dev", support_cmd))
     app.add_handler(CommandHandler("invite", show_invite))
     app.add_handler(CommandHandler("agency", agency_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
