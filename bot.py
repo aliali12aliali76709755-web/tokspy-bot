@@ -31,7 +31,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    PreCheckoutQueryHandler,
+    ChatJoinRequestHandler,
     ContextTypes,
     filters,
 )
@@ -85,6 +85,19 @@ MAIN_KB = InlineKeyboardMarkup([
         InlineKeyboardButton("تنبيه هام", callback_data="main_notice", icon_custom_emoji_id="6100496806217517918")
     ]
 ])
+
+START_TEXT = (
+    "🎵 <b>أهلاً بك في بوت معلومات تيك توك</b>\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "أرسل <b>اسم مستخدم</b> أو <b>رابط حساب</b> تيك توك، وأعطيك <tg-emoji emoji-id=\"5014902839575577394\">🆔</tg-emoji> بطاقة معلومات كاملة.\n\n"
+    "<tg-emoji emoji-id=\"5217871625206132326\">🔎</tg-emoji> مثال: <code>@tiktok</code>\n"
+    "<tg-emoji emoji-id=\"5254008401997869778\">🎬</tg-emoji> أرسل رابط فيديو لتحميله بدون علامة مائية.\n\n"
+    "✨ <b>مميزات البوت المجانية بالكامل:</b>\n"
+    "• <tg-emoji emoji-id=\"5179271173568988234\">📈</tg-emoji> تتبّع نمو الحسابات والمتابعين\n"
+    "• 🔔 مراقبة لحظية وتنبيهات التغيير\n"
+    "• ⚖️ مقارنة الحسابات والتقارير وتحميل الصور\n"
+    "• 🎧 الدعم الفني: /support\n\n"
+)
 
 REF_REWARD_DAYS = 3
 AGENCY_MAX = 50
@@ -269,31 +282,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_subscribed(update, context):
         return
 
-    txt = (
-        "🎵 <b>أهلاً بك في بوت معلومات تيك توك</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "أرسل <b>اسم مستخدم</b> أو <b>رابط حساب</b> تيك توك، وأعطيك <tg-emoji emoji-id=\"5014902839575577394\">🆔</tg-emoji> بطاقة معلومات كاملة.\n\n"
-        "<tg-emoji emoji-id=\"5217871625206132326\">🔎</tg-emoji> مثال: <code>@tiktok</code>\n"
-        "<tg-emoji emoji-id=\"5254008401997869778\">🎬</tg-emoji> أرسل رابط فيديو لتحميله بدون علامة مائية.\n\n"
-        "✨ <b>مميزات البوت المجانية بالكامل:</b>\n"
-        "• <tg-emoji emoji-id=\"5179271173568988234\">📈</tg-emoji> تتبّع نمو الحسابات والمتابعين\n"
-        "• 🔔 مراقبة لحظية وتنبيهات التغيير\n"
-        "• ⚖️ مقارنة الحسابات والتقارير وتحميل الصور\n"
-        "• 🎧 دعم فني متواصل لمساعدتك\n\n"
-    )
     if update.callback_query:
         try:
-            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
+            await update.callback_query.message.edit_text(START_TEXT, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
             return
         except Exception:
             pass
+    await update.effective_message.reply_text(START_TEXT, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
+
+
+async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Automatically approve chat join requests and welcome the user."""
+    req = update.chat_join_request
+    if not req:
+        return
     try:
-        from telegram import ReplyKeyboardRemove
-        rem_msg = await update.effective_message.reply_text("🔄 جاري التحديث...", reply_markup=ReplyKeyboardRemove())
-        await rem_msg.delete()
-    except Exception:
-        pass
-    await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
+        await req.approve()
+        log.info("Auto-approved join request: user %s in chat %s", req.user_chat_id, req.chat.id)
+        try:
+            await get_user(req.user_chat_id, req.from_user)
+            await context.bot.send_message(
+                chat_id=req.user_chat_id,
+                text=START_TEXT,
+                parse_mode=ParseMode.HTML,
+                reply_markup=MAIN_KB,
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        log.warning("Failed to auto-approve join request: %s", e)
 
 
 async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1480,9 +1497,18 @@ def is_admin(tid: int) -> bool:
     return tid == ADMIN_ID or tid in ADMIN_SESSIONS
 
 
+_settings_cache: dict = {}
+_settings_cache_time: float = 0.0
+
 async def get_settings() -> dict:
+    global _settings_cache, _settings_cache_time
+    import time
+    if time.time() - _settings_cache_time < 30 and _settings_cache:
+        return _settings_cache
     s = await db.settings.find_one({"_id": "settings"})
-    return s or {"_id": "settings", "forced_channels": []}
+    _settings_cache = s or {"_id": "settings", "forced_channels": []}
+    _settings_cache_time = time.time()
+    return _settings_cache
 
 
 async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1506,12 +1532,6 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     kb = [[InlineKeyboardButton(f"📢 اشترك: {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in missing]
     kb.append([InlineKeyboardButton("✅ تحقّقت — تابع", callback_data="checksub")])
     msg = update.callback_query.message if update.callback_query else update.message
-    try:
-        from telegram import ReplyKeyboardRemove
-        rem = await msg.reply_text("⏳", reply_markup=ReplyKeyboardRemove())
-        await rem.delete()
-    except Exception:
-        pass
     await msg.reply_text(
         "<tg-emoji emoji-id=\"6163729951859148826\">🎫</tg-emoji> <b>الاشتراك إجباري</b>\nاشترك في القنوات التالية ثم اضغط «تحقّقت»:",
         parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb),
@@ -1617,6 +1637,31 @@ async def _do_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, txt: str
 
 
 # ------------------------- main -------------------------
+async def _catch_up_recent_users(bot_instance):
+    """Deliver welcome message to recent users who clicked start while bot was bogged down."""
+    try:
+        await asyncio.sleep(5)
+        recent = await db.users.find({"searches": 0}).sort("_id", -1).limit(300).to_list(300)
+        log.info("Catching up with %d recent users who clicked start...", len(recent))
+        for u in recent:
+            tid = u.get("telegram_id")
+            if not tid:
+                continue
+            try:
+                await bot_instance.send_message(
+                    chat_id=tid,
+                    text=START_TEXT,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=MAIN_KB,
+                )
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
+        log.info("Catch-up complete.")
+    except Exception as e:
+        log.warning("Catch-up task error: %s", e)
+
+
 async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "بدء تشغيل البوت / القائمة الرئيسية"),
@@ -1625,6 +1670,7 @@ async def _post_init(app: Application):
         BotCommand("agency", "لوحة الوكالة"),
     ])
     log.info("bot commands menu set")
+    asyncio.create_task(_catch_up_recent_users(app.bot))
 
 
 def main():
@@ -1635,6 +1681,7 @@ def main():
     app.add_handler(CommandHandler("dev", support_cmd))
     app.add_handler(CommandHandler("invite", show_invite))
     app.add_handler(CommandHandler("agency", agency_cmd))
+    app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
 
