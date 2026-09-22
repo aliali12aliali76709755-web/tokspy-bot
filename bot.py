@@ -41,6 +41,7 @@ from telegram.ext import (
 import tiktok_service as tk
 import formatting as F
 import reports as R
+import i18n
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
@@ -295,6 +296,15 @@ def account_kb(uid: str) -> InlineKeyboardMarkup:
 
 
 # ------------------------- commands -------------------------
+async def get_effective_lang(context: ContextTypes.DEFAULT_TYPE, user) -> str:
+    lang = context.user_data.get("lang") if context and context.user_data else None
+    if not lang and user:
+        lang = i18n.detect_lang(getattr(user, "language_code", None))
+        if context and context.user_data is not None:
+            context.user_data["lang"] = lang
+    return lang or "ar"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
@@ -319,17 +329,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_subscribed(update, context):
         return
 
+    user_lang = await get_effective_lang(context, user)
+    start_text = i18n.get_start_text(user_lang)
+    main_kb = i18n.get_main_keyboard(user_lang)
+
     if update.callback_query:
         try:
-            await update.callback_query.message.edit_text(START_TEXT, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
+            await update.callback_query.message.edit_text(start_text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb)
             return
         except Exception:
             pass
-    await update.effective_message.reply_text(START_TEXT, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
+    await update.effective_message.reply_text(start_text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb)
 
 
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Automatically approve chat join requests and welcome the user."""
+    """Automatically approve chat join requests and welcome the user in their language."""
     req = update.chat_join_request
     if not req:
         return
@@ -340,12 +354,15 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tid not in KNOWN_USERS:
             KNOWN_USERS.add(tid)
             asyncio.create_task(_save_user_background(tid, req.from_user))
+        user_lang = i18n.detect_lang(getattr(req.from_user, "language_code", None))
+        start_text = i18n.get_start_text(user_lang)
+        main_kb = i18n.get_main_keyboard(user_lang)
         try:
             await context.bot.send_message(
                 chat_id=tid,
-                text=START_TEXT,
-                parse_mode=ParseMode.HTML,
-                reply_markup=MAIN_KB,
+                text=start_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=main_kb,
             )
         except Exception:
             pass
@@ -354,27 +371,37 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (
-        "🎧 <b>قسم الدعم الفني والمساعدة</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "إذا واجهتك أي مشكلة أثناء استخدام البوت، أو كان لديك أي استفسار أو اقتراح، "
-        "يمكنك التواصل مباشرة مع الدعم الفني.\n\n"
-        "👇 اضغط على الزر أدناه لمراسلة الدعم الفني مباشرة:"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 مراسلة الدعم الفني", url=SUPPORT_URL)],
-        [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="main_back_start")]
-    ])
+    user = update.effective_user
+    user_lang = await get_effective_lang(context, user)
+    txt = i18n.get_msg(user_lang, "support_text")
+    kb = i18n.get_support_keyboard(user_lang, support_id=str(SUPPORT_ID))
     if update.callback_query:
         await update.callback_query.answer()
         try:
-            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
             return
         except Exception:
             pass
-        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     else:
-        await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.effective_message.reply_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_lang = await get_effective_lang(context, user)
+    txt = i18n.get_msg(user_lang, "choose_lang")
+    kb = i18n.get_language_selection_keyboard()
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.edit_text(txt, reply_markup=kb)
+            return
+        except Exception:
+            pass
+        await update.callback_query.message.reply_text(txt, reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(txt, reply_markup=kb)
 
 
 async def dev_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -675,6 +702,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     action, _, arg = data.partition(":")
 
+    user_lang = await get_effective_lang(context, q.from_user)
+
     if action not in ("checksub", "buy"):
         if not await ensure_subscribed(update, context):
             return
@@ -682,13 +711,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "buy":
         return await show_vip(update, context)
 
+    if action == "set_lang":
+        return await lang_cmd(update, context)
+
+    if action == "lang":
+        new_lang = arg if arg in i18n.SUPPORTED_LANGUAGES else "ar"
+        if context and context.user_data is not None:
+            context.user_data["lang"] = new_lang
+        asyncio.create_task(db.users.update_one({"telegram_id": tid}, {"$set": {"lang": new_lang}}, upsert=True))
+        confirm_txt = i18n.get_msg(new_lang, "lang_selected")
+        await q.answer(confirm_txt)
+        start_txt = i18n.get_start_text(new_lang)
+        kb = i18n.get_main_keyboard(new_lang)
+        try:
+            return await q.message.edit_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        except Exception:
+            return await q.message.reply_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    if action in ("back_home", "main_back_start"):
+        start_txt = i18n.get_start_text(user_lang)
+        kb = i18n.get_main_keyboard(user_lang)
+        try:
+            return await q.message.edit_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        except Exception:
+            return await q.message.reply_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
     if action == "add_mon_prompt":
         return await q.message.reply_text("🔍 أرسل اليوزر أو الرابط للحساب ليتم مراقبته:")
     if action == "main_search":
-        return await q.message.reply_text("🔎 أرسل اسم المستخدم أو رابط الحساب:")
+        return await q.message.reply_text(i18n.get_msg(user_lang, "prompt_search"))
     if action == "main_dl":
-        return await q.message.reply_text("🎬 أرسل رابط فيديو تيك توك لتحميله بدون علامة مائية:")
-    if action == "main_mon":
+        return await q.message.reply_text(i18n.get_msg(user_lang, "prompt_dl"))
+    if action in ("main_mon", "main_monitors"):
         return await my_monitors(update, context)
     if action == "main_agency":
         return await agency_panel(update, context)
@@ -698,10 +752,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_invite(update, context)
     if action == "main_support":
         return await support_cmd(update, context)
-    if action == "main_back_start":
-        if q:
-            await q.answer()
-        return await start(update, context)
     if action == "main_notice":
         return await show_notice(update, context)
 
@@ -1687,12 +1737,13 @@ async def _catch_up_recent_users(bot_instance):
             tid = u.get("telegram_id")
             if not tid:
                 continue
+            u_lang = u.get("lang") or "ar"
             try:
                 await bot_instance.send_message(
                     chat_id=tid,
-                    text=START_TEXT,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=MAIN_KB,
+                    text=i18n.get_start_text(u_lang),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=i18n.get_main_keyboard(u_lang),
                 )
                 await asyncio.sleep(0.05)
             except Exception:
@@ -1729,20 +1780,41 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 
 async def _post_init(app: Application):
+    """Register multilingual Bot SEO and commands for global search ranking."""
+    for lang in i18n.SUPPORTED_LANGUAGES:
+        seo = i18n.BOT_SEO.get(lang, {})
+        cmds = i18n.BOT_COMMANDS.get(lang, [])
+        try:
+            if seo.get("name"):
+                await app.bot.set_my_name(name=seo["name"], language_code=lang)
+        except Exception as e:
+            log.warning("set_my_name failed for %s: %s", lang, e)
+        try:
+            if seo.get("short_description"):
+                await app.bot.set_my_short_description(short_description=seo["short_description"], language_code=lang)
+        except Exception as e:
+            log.warning("set_my_short_description failed for %s: %s", lang, e)
+        try:
+            if seo.get("description"):
+                await app.bot.set_my_description(description=seo["description"], language_code=lang)
+        except Exception as e:
+            log.warning("set_my_description failed for %s: %s", lang, e)
+        try:
+            if cmds:
+                await app.bot.set_my_commands(commands=cmds, language_code=lang)
+        except Exception as e:
+            log.warning("set_my_commands failed for %s: %s", lang, e)
+
+    # Fallback / Default SEO
     try:
-        await app.bot.set_my_commands([
-            BotCommand("start", "بدء تشغيل البوت / القائمة الرئيسية"),
-            BotCommand("support", "الدعم الفني"),
-            BotCommand("invite", "دعوة الأصدقاء ومشاركة البوت"),
-            BotCommand("agency", "لوحة الوكالة"),
-        ])
-        log.info("bot commands menu set")
+        await app.bot.set_my_name(name=i18n.BOT_SEO["ar"]["name"])
+        await app.bot.set_my_short_description(short_description=i18n.BOT_SEO["ar"]["short_description"])
+        await app.bot.set_my_description(description=i18n.BOT_SEO["ar"]["description"])
+        await app.bot.set_my_commands(commands=i18n.BOT_COMMANDS["ar"])
+        log.info("Multilingual SEO and commands registered successfully.")
     except Exception as e:
-        log.warning("set_my_commands failed: %s", e)
-    try:
-        await app.bot.set_my_short_description("بوت تحميل تيك توك بدون علامة مائية ومعلومات وإحصائيات الحسابات مجاناً")
-    except Exception as e:
-        log.warning("set_my_short_description failed: %s", e)
+        log.warning("Default SEO setup failed: %s", e)
+
     await _preload_known_users()
     asyncio.create_task(_catch_up_recent_users(app.bot))
 
@@ -1765,6 +1837,7 @@ def main():
     )
     app.add_error_handler(global_error_handler)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("lang", lang_cmd))
     app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CommandHandler("vip", show_vip))
     app.add_handler(CommandHandler("dev", support_cmd))
