@@ -82,10 +82,6 @@ MAIN_KB = InlineKeyboardMarkup([
         InlineKeyboardButton("دعوة الأصدقاء", callback_data="main_invite", icon_custom_emoji_id="6048721430730773527")
     ],
     [
-        InlineKeyboardButton("🎧 الدعم الفني", callback_data="main_support"),
-        InlineKeyboardButton("مساعدة", callback_data="main_help", icon_custom_emoji_id="5415705360822446110")
-    ],
-    [
         InlineKeyboardButton("تنبيه هام", callback_data="main_notice", icon_custom_emoji_id="6100496806217517918")
     ]
 ])
@@ -324,43 +320,6 @@ async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = (
-        "ℹ️ <b>شرح البوت وكل الميزات</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🔎 <b>البحث:</b> أرسل <code>@username</code> أو آيدي أو رابط الحساب → بطاقة معلومات كاملة.\n"
-        "🎬 <b>تحميل:</b> أرسل رابط فيديو تيك توك → تحميل بدون علامة مائية مع الإحصائيات.\n\n"
-        "<b>أزرار الحساب (مجانية بالكامل للجميع):</b>\n"
-        "• 🖼 الصورة HD — تحميل صورة البروفايل.\n"
-        "• 🏆 مستوى الحساب — تصنيف الحساب وتقدّمه.\n"
-        "• 📊 معدل التفاعل — تحليل جودة الجمهور.\n"
-        "• 📸 مشاهدة الستوري — عرض ستوري الحساب إن وُجد.\n"
-        "• ⭐ أبرز القصص — أبرز مقاطع الحساب.\n"
-        "• 📈 النمو — تطوّر المتابعين مع رسم بياني.\n"
-        "• 🔔 مراقبة الحساب — تنبيه بأي تغيير ونشر وحذف الفيديوهات.\n"
-        "• ⚖️ مقارنة الحسابات — قارن حسابين.\n"
-        "• 📄 تقرير PDF — تقرير احترافي.\n"
-        "• 🛡 كشف المقلّدين — الحسابات التي تنتحل الاسم.\n\n"
-        "🎁 <b>الدعوات:</b> شارك البوت مع أصدقائك لدعمنا.\n"
-        "🏢 <b>لوحة الوكالة:</b> راقب عملاءك مع تقرير أسبوعي.\n\n"
-        "✨ جميع ميزات البوت مفتوحة ومجانية 100% بلا أي حدود! ✨"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 مراسلة الدعم الفني", url=SUPPORT_URL)],
-        [InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="main_back_start")]
-    ])
-    if update.callback_query:
-        await update.callback_query.answer()
-        try:
-            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
-            return
-        except Exception:
-            pass
-        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else:
-        await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
-
-
 async def dev_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await support_cmd(update, context)
 
@@ -573,8 +532,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await start(update, context)
     if text.lower() in ("الدعم الفني", "الدعم", "دعم", "/support", "support"):
         return await support_cmd(update, context)
-    if text.lower() in ("مساعدة", "المساعدة", "/help", "help"):
-        return await help_cmd(update, context)
 
     if tk.is_video_link(text):
         return await do_download(update, context, text)
@@ -688,8 +645,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if q:
             await q.answer()
         return await start(update, context)
-    if action == "main_help":
-        return await help_cmd(update, context)
     if action == "main_notice":
         return await show_notice(update, context)
 
@@ -1666,7 +1621,6 @@ async def _post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "بدء تشغيل البوت / القائمة الرئيسية"),
         BotCommand("support", "الدعم الفني"),
-        BotCommand("help", "شرح البوت وكل الميزات"),
         BotCommand("invite", "دعوة الأصدقاء ومشاركة البوت"),
         BotCommand("agency", "لوحة الوكالة"),
     ])
@@ -1677,7 +1631,6 @@ def main():
     app: Application = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("support", support_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("vip", show_vip))
     app.add_handler(CommandHandler("dev", support_cmd))
     app.add_handler(CommandHandler("invite", show_invite))
