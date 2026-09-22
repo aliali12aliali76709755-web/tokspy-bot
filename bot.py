@@ -25,6 +25,8 @@ from telegram import (
     BotCommand,
 )
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
+from telegram.error import RetryAfter, TimedOut, NetworkError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -60,8 +62,54 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 log = logging.getLogger("tiktokbot")
 
 import certifi
-client = AsyncIOMotorClient(os.environ["MONGO_URL"], tlsCAFile=certifi.where())
+client = AsyncIOMotorClient(os.environ["MONGO_URL"], tlsCAFile=certifi.where(), maxPoolSize=100, minPoolSize=10)
 db = client[os.environ["DB_NAME"]]
+
+# High-load in-memory cache
+KNOWN_USERS: set[int] = set()
+LAST_START_TIMES: dict[int, float] = {}
+
+async def _save_user_background(tid: int, tg_user):
+    try:
+        await db.users.update_one(
+            {"telegram_id": tid},
+            {
+                "$setOnInsert": {
+                    "telegram_id": tid,
+                    "username": getattr(tg_user, "username", None),
+                    "first_name": getattr(tg_user, "first_name", None),
+                    "is_vip": False,
+                    "vip_until": None,
+                    "favorites": [],
+                    "joined_at": now().isoformat(),
+                    "searches": 0,
+                    "search_day": "",
+                    "day_count": 0,
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        log.warning("Background user save failed for %s: %s", tid, e)
+
+async def _handle_referral(tid: int, arg: str, bot_instance):
+    try:
+        ref = int(arg[4:])
+        if ref and ref != tid and (ref in KNOWN_USERS or await db.users.find_one({"telegram_id": ref})):
+            await db.users.update_one({"telegram_id": tid}, {"$set": {"referred_by": ref}})
+            await db.users.update_one({"telegram_id": ref}, {"$inc": {"invites": 1}})
+            ref_user = await db.users.find_one({"telegram_id": ref})
+            invites = ref_user.get("invites", 1) if ref_user else 1
+            try:
+                await bot_instance.send_message(
+                    ref,
+                    f"🎁 <b>صديق جديد انضم عبر رابطك!</b> (إجمالي دعواتك: {invites})",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # ------------------------- reply keyboard -------------------------
 BTN_SEARCH = "🔍 بحث عن حساب"
@@ -248,37 +296,26 @@ def account_kb(uid: str) -> InlineKeyboardMarkup:
 
 # ------------------------- commands -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tid = update.effective_user.id
-    existing = await db.users.find_one({"telegram_id": tid})
-    await get_user(tid, update.effective_user)
-    # referral handling
-    args = getattr(context, "args", None)
-    if not existing and args:
-        arg = args[0]
-        if arg.startswith("ref_"):
-            try:
-                ref = int(arg[4:])
-            except ValueError:
-                ref = 0
-            if ref and ref != tid and await db.users.find_one({"telegram_id": ref}):
-                await db.users.update_one({"telegram_id": tid}, {"$set": {"referred_by": ref}})
-                await db.users.update_one({"telegram_id": ref}, {"$inc": {"invites": 1}})
-                ref_user = await db.users.find_one({"telegram_id": ref})
-                invites = ref_user.get("invites", 1) if ref_user else 1
-                try:
-                    await context.bot.send_message(
-                        ref,
-                        f"🎁 <b>صديق جديد انضم عبر رابطك!</b> (إجمالي دعواتك: {invites})",
-                        parse_mode=ParseMode.HTML,
-                    )
-                    if invites % 20 == 0:
-                        await context.bot.send_message(
-                            ref,
-                            f"🎉 <b>رائع جداً!</b> لقد دعوت {invites} صديقاً لاستخدام البوت، شكراً لدعمك ومشاركتك للبوت! ❤️",
-                            parse_mode=ParseMode.HTML
-                        )
-                except Exception:
-                    pass
+    user = update.effective_user
+    if not user:
+        return
+    tid = user.id
+
+    # Debounce spam clicks within 1.5s from same user
+    import time
+    t_now = time.time()
+    if t_now - LAST_START_TIMES.get(tid, 0) < 1.5:
+        return
+    LAST_START_TIMES[tid] = t_now
+
+    # Fast in-memory check: zero database round-trips for existing users
+    if tid not in KNOWN_USERS:
+        KNOWN_USERS.add(tid)
+        asyncio.create_task(_save_user_background(tid, user))
+        args = getattr(context, "args", None)
+        if args and args[0].startswith("ref_"):
+            asyncio.create_task(_handle_referral(tid, args[0], context.bot))
+
     if not await ensure_subscribed(update, context):
         return
 
@@ -299,10 +336,13 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await req.approve()
         log.info("Auto-approved join request: user %s in chat %s", req.user_chat_id, req.chat.id)
+        tid = req.user_chat_id
+        if tid not in KNOWN_USERS:
+            KNOWN_USERS.add(tid)
+            asyncio.create_task(_save_user_background(tid, req.from_user))
         try:
-            await get_user(req.user_chat_id, req.from_user)
             await context.bot.send_message(
-                chat_id=req.user_chat_id,
+                chat_id=tid,
                 text=START_TEXT,
                 parse_mode=ParseMode.HTML,
                 reply_markup=MAIN_KB,
@@ -1662,19 +1702,68 @@ async def _catch_up_recent_users(bot_instance):
         log.warning("Catch-up task error: %s", e)
 
 
+async def _preload_known_users():
+    """Load existing users into in-memory set to prevent database queries during /start."""
+    try:
+        count = 0
+        async for doc in db.users.find({}, {"telegram_id": 1}):
+            tid = doc.get("telegram_id")
+            if tid:
+                KNOWN_USERS.add(tid)
+                count += 1
+        log.info("Preloaded %d known users into fast-path memory cache", count)
+    except Exception as e:
+        log.warning("Failed preloading users: %s", e)
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Gracefully handle Telegram FloodControl (429) and network timeouts without crashing."""
+    err = context.error
+    if isinstance(err, RetryAfter):
+        log.warning("Telegram FloodControl: Retrying after %s seconds", err.retry_after)
+        await asyncio.sleep(err.retry_after)
+    elif isinstance(err, (TimedOut, NetworkError)):
+        log.warning("Telegram network glitch: %s", err)
+    else:
+        log.error("Unhandled exception: %s", err)
+
+
 async def _post_init(app: Application):
-    await app.bot.set_my_commands([
-        BotCommand("start", "بدء تشغيل البوت / القائمة الرئيسية"),
-        BotCommand("support", "الدعم الفني"),
-        BotCommand("invite", "دعوة الأصدقاء ومشاركة البوت"),
-        BotCommand("agency", "لوحة الوكالة"),
-    ])
-    log.info("bot commands menu set")
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("start", "بدء تشغيل البوت / القائمة الرئيسية"),
+            BotCommand("support", "الدعم الفني"),
+            BotCommand("invite", "دعوة الأصدقاء ومشاركة البوت"),
+            BotCommand("agency", "لوحة الوكالة"),
+        ])
+        log.info("bot commands menu set")
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
+    try:
+        await app.bot.set_my_short_description("بوت تحميل تيك توك بدون علامة مائية ومعلومات وإحصائيات الحسابات مجاناً")
+    except Exception as e:
+        log.warning("set_my_short_description failed: %s", e)
+    await _preload_known_users()
     asyncio.create_task(_catch_up_recent_users(app.bot))
 
 
 def main():
-    app: Application = ApplicationBuilder().token(BOT_TOKEN).post_init(_post_init).build()
+    httpx_req = HTTPXRequest(
+        connection_pool_size=300,
+        pool_timeout=30.0,
+        connect_timeout=15.0,
+        read_timeout=15.0,
+        write_timeout=15.0,
+    )
+    app: Application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .request(httpx_req)
+        .concurrent_updates(256)
+        .post_init(_post_init)
+        .build()
+    )
+    app.add_error_handler(global_error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CommandHandler("vip", show_vip))
@@ -1689,8 +1778,8 @@ def main():
     app.job_queue.run_repeating(impersonation_job, interval=6 * 3600, first=300)
     app.job_queue.run_repeating(weekly_report_job, interval=7 * 24 * 3600, first=600)
 
-    log.info("Bot starting (polling)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    log.info("Bot starting (high-concurrency polling)...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
 
 
 if __name__ == "__main__":
