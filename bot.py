@@ -311,13 +311,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tid = user.id
 
-    # Debounce spam clicks within 1.5s from same user
-    import time
-    t_now = time.time()
-    if t_now - LAST_START_TIMES.get(tid, 0) < 1.5:
-        return
-    LAST_START_TIMES[tid] = t_now
-
     # Fast in-memory check: zero database round-trips for existing users
     if tid not in KNOWN_USERS:
         KNOWN_USERS.add(tid)
@@ -335,11 +328,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.callback_query:
         try:
-            await update.callback_query.message.edit_text(start_text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb)
+            await update.callback_query.answer()
+        except Exception:
+            pass
+        try:
+            await update.callback_query.message.edit_text(start_text, parse_mode=ParseMode.HTML, reply_markup=main_kb)
             return
         except Exception:
             pass
-    await update.effective_message.reply_text(start_text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb)
+
+    try:
+        await update.effective_message.reply_text(start_text, parse_mode=ParseMode.HTML, reply_markup=main_kb)
+    except Exception:
+        # Resilient fallback without parse_mode
+        await update.effective_message.reply_text(start_text, reply_markup=main_kb)
 
 
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,11 +363,15 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=tid,
                 text=start_text,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=main_kb,
             )
         except Exception:
-            pass
+            await context.bot.send_message(
+                chat_id=tid,
+                text=start_text,
+                reply_markup=main_kb,
+            )
     except Exception as e:
         log.warning("Failed to auto-approve join request: %s", e)
 
@@ -378,13 +384,19 @@ async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
         try:
-            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            await update.callback_query.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
             return
         except Exception:
             pass
-        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        try:
+            await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception:
+            await update.callback_query.message.reply_text(txt, reply_markup=kb)
     else:
-        await update.effective_message.reply_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        try:
+            await update.effective_message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception:
+            await update.effective_message.reply_text(txt, reply_markup=kb)
 
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -724,17 +736,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_txt = i18n.get_start_text(new_lang)
         kb = i18n.get_main_keyboard(new_lang)
         try:
-            return await q.message.edit_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            return await q.message.edit_text(start_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
         except Exception:
-            return await q.message.reply_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            try:
+                return await q.message.reply_text(start_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+            except Exception:
+                return await q.message.reply_text(start_txt, reply_markup=kb)
 
     if action in ("back_home", "main_back_start"):
         start_txt = i18n.get_start_text(user_lang)
         kb = i18n.get_main_keyboard(user_lang)
         try:
-            return await q.message.edit_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            return await q.message.edit_text(start_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
         except Exception:
-            return await q.message.reply_text(start_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            try:
+                return await q.message.reply_text(start_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+            except Exception:
+                return await q.message.reply_text(start_txt, reply_markup=kb)
 
     if action == "add_mon_prompt":
         return await q.message.reply_text("🔍 أرسل اليوزر أو الرابط للحساب ليتم مراقبته:")
@@ -1742,7 +1760,7 @@ async def _catch_up_recent_users(bot_instance):
                 await bot_instance.send_message(
                     chat_id=tid,
                     text=i18n.get_start_text(u_lang),
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=ParseMode.HTML,
                     reply_markup=i18n.get_main_keyboard(u_lang),
                 )
                 await asyncio.sleep(0.05)

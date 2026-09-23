@@ -141,7 +141,7 @@ MESSAGES = {
         "prompt_search": "🔍 أرسل يوزر حساب تيك توك للبدء بالتحليل والبحث:",
         "prompt_dl": "📥 أرسل رابط فيديو تيك توك لتحميله بدون علامة مائية وبأعلى دقة:",
         "support_text": (
-            "💬 **قسم الدعم الفني**\n\n"
+            "💬 <b>قسم الدعم الفني</b>\n\n"
             "إذا واجهتك أي مشكلة أو كان لديك استفسار أو اقتراح، اضغط على الزر أدناه للتواصل مباشرة مع فريق الدعم."
         ),
         "btn_contact_support": "💬 تواصل مع الدعم الفني",
@@ -164,7 +164,7 @@ MESSAGES = {
         "prompt_search": "🔍 Send a TikTok username to inspect and analyze:",
         "prompt_dl": "📥 Send a TikTok video link to download in HD without watermark:",
         "support_text": (
-            "💬 **Technical Support**\n\n"
+            "💬 <b>Technical Support</b>\n\n"
             "If you have any issues, questions, or feedback, click the button below to reach our support team directly."
         ),
         "btn_contact_support": "💬 Contact Support",
@@ -187,7 +187,7 @@ MESSAGES = {
         "prompt_search": "🔍 Отправьте юзернейм (ник) аккаунта TikTok для поиска и анализа:",
         "prompt_dl": "📥 Отправьте ссылку на видео TikTok для скачивания без водяного знака в HD:",
         "support_text": (
-            "💬 **Служба технической поддержки**\n\n"
+            "💬 <b>Служба технической поддержки</b>\n\n"
             "Если у вас возникли вопросы, проблемы или предложения, нажмите кнопку ниже для связи с поддержкой."
         ),
         "btn_contact_support": "💬 Связаться с поддержкой",
@@ -210,7 +210,7 @@ MESSAGES = {
         "prompt_search": "🔍 请发送 TikTok 用户名开始查询与数据分析：",
         "prompt_dl": "📥 请发送 TikTok 视频链接以快速无水印下载：",
         "support_text": (
-            "💬 **技术支持中心**\n\n"
+            "💬 <b>技术支持中心</b>\n\n"
             "如遇到任何问题、使用咨询或合作建议，请点击下方按钮直接联系专属客服。"
         ),
         "btn_contact_support": "💬 联系客服支持",
@@ -233,7 +233,7 @@ MESSAGES = {
         "prompt_search": "🔍 نام کاربری (آیدی) تیک‌تاک مورد نظر را جهت آنالیز ارسال کنید:",
         "prompt_dl": "📥 لینک ویدیوی تیک‌تاک را جهت دانلود با کیفیت اصلی و بدون آرم ارسال کنید:",
         "support_text": (
-            "💬 **بخش پشتیبانی فنی**\n\n"
+            "💬 <b>بخش پشتیبانی فنی</b>\n\n"
             "در صورت بروز هرگونه مشکل یا داشتن سؤال، روی دکمه زیر کلیک کرده و با کارشناسان ما در ارتباط باشید."
         ),
         "btn_contact_support": "💬 ارتباط با پشتیبانی",
@@ -256,7 +256,7 @@ MESSAGES = {
         "prompt_search": "🔍 Analiz etmek istediğiniz TikTok kullanıcı adını gönderin:",
         "prompt_dl": "📥 Filigransız ve HD kalitede indirmek istediğiniz TikTok video bağlantısını gönderin:",
         "support_text": (
-            "💬 **Teknik Destek Bölümü**\n\n"
+            "💬 <b>Teknik Destek Bölümü</b>\n\n"
             "Herhangi bir sorun, soru veya öneriniz varsa, doğrudan destek ekibimizle görüşmek için aşağıdaki butona tıklayın."
         ),
         "btn_contact_support": "💬 Destek Ekibiyle İletişime Geç",
@@ -300,7 +300,7 @@ def get_msg(lang: str, key: str) -> str:
 def get_start_text(lang: str) -> str:
     title = get_msg(lang, "start_title")
     body = get_msg(lang, "start_body")
-    return f"✨ **{title}**\n\n{body}"
+    return f"✨ <b>{title}</b>\n\n{body}"
 
 
 def get_main_keyboard(lang: str) -> InlineKeyboardMarkup:
