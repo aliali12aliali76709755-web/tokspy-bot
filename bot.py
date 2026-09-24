@@ -70,28 +70,31 @@ db = client[os.environ["DB_NAME"]]
 KNOWN_USERS: set[int] = set()
 LAST_START_TIMES: dict[int, float] = {}
 
+USER_SAVE_SEM = asyncio.Semaphore(25)
+
 async def _save_user_background(tid: int, tg_user):
-    try:
-        await db.users.update_one(
-            {"telegram_id": tid},
-            {
-                "$setOnInsert": {
-                    "telegram_id": tid,
-                    "username": getattr(tg_user, "username", None),
-                    "first_name": getattr(tg_user, "first_name", None),
-                    "is_vip": False,
-                    "vip_until": None,
-                    "favorites": [],
-                    "joined_at": now().isoformat(),
-                    "searches": 0,
-                    "search_day": "",
-                    "day_count": 0,
-                }
-            },
-            upsert=True,
-        )
-    except Exception as e:
-        log.warning("Background user save failed for %s: %s", tid, e)
+    async with USER_SAVE_SEM:
+        try:
+            await db.users.update_one(
+                {"telegram_id": tid},
+                {
+                    "$setOnInsert": {
+                        "telegram_id": tid,
+                        "username": getattr(tg_user, "username", None),
+                        "first_name": getattr(tg_user, "first_name", None),
+                        "is_vip": False,
+                        "vip_until": None,
+                        "favorites": [],
+                        "joined_at": now().isoformat(),
+                        "searches": 0,
+                        "search_day": "",
+                        "day_count": 0,
+                    }
+                },
+                upsert=True,
+            )
+        except Exception as e:
+            log.warning("Background user save failed for %s: %s", tid, e)
 
 async def _handle_referral(tid: int, arg: str, bot_instance):
     try:
@@ -345,7 +348,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Automatically approve chat join requests and welcome the user in their language."""
+    """Automatically approve chat join requests instantly and welcome the user in their language."""
     req = update.chat_join_request
     if not req:
         return
@@ -359,19 +362,26 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_lang = i18n.detect_lang(getattr(req.from_user, "language_code", None))
         start_text = i18n.get_start_text(user_lang)
         main_kb = i18n.get_main_keyboard(user_lang)
-        try:
-            await context.bot.send_message(
-                chat_id=tid,
-                text=start_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_kb,
-            )
-        except Exception:
-            await context.bot.send_message(
-                chat_id=tid,
-                text=start_text,
-                reply_markup=main_kb,
-            )
+
+        async def _send_welcome_bg():
+            try:
+                await context.bot.send_message(
+                    chat_id=tid,
+                    text=start_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=main_kb,
+                )
+            except Exception:
+                try:
+                    await context.bot.send_message(
+                        chat_id=tid,
+                        text=start_text,
+                        reply_markup=main_kb,
+                    )
+                except Exception:
+                    pass
+
+        asyncio.create_task(_send_welcome_bg())
     except Exception as e:
         log.warning("Failed to auto-approve join request: %s", e)
 
@@ -1605,17 +1615,21 @@ def is_admin(tid: int) -> bool:
     return tid == ADMIN_ID or tid in ADMIN_SESSIONS
 
 
-_settings_cache: dict = {}
+_settings_cache: dict = {"_id": "settings", "forced_channels": []}
 _settings_cache_time: float = 0.0
 
 async def get_settings() -> dict:
     global _settings_cache, _settings_cache_time
     import time
-    if time.time() - _settings_cache_time < 30 and _settings_cache:
+    t_now = time.time()
+    if t_now - _settings_cache_time < 60:
         return _settings_cache
-    s = await db.settings.find_one({"_id": "settings"})
-    _settings_cache = s or {"_id": "settings", "forced_channels": []}
-    _settings_cache_time = time.time()
+    try:
+        s = await db.settings.find_one({"_id": "settings"})
+        _settings_cache = s or {"_id": "settings", "forced_channels": []}
+        _settings_cache_time = t_now
+    except Exception:
+        pass
     return _settings_cache
 
 
@@ -1639,11 +1653,15 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return True
     kb = [[InlineKeyboardButton(f"📢 اشترك: {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in missing]
     kb.append([InlineKeyboardButton("✅ تحقّقت — تابع", callback_data="checksub")])
-    msg = update.callback_query.message if update.callback_query else update.message
-    await msg.reply_text(
-        "<tg-emoji emoji-id=\"6163729951859148826\">🎫</tg-emoji> <b>الاشتراك إجباري</b>\nاشترك في القنوات التالية ثم اضغط «تحقّقت»:",
-        parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb),
-    )
+    msg = update.effective_message
+    if msg:
+        try:
+            await msg.reply_text(
+                "<tg-emoji emoji-id=\"6163729951859148826\">🎫</tg-emoji> <b>الاشتراك إجباري</b>\nاشترك في القنوات التالية ثم اضغط «تحقّقت»:",
+                parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb),
+            )
+        except Exception:
+            pass
     return False
 
 
@@ -1745,32 +1763,6 @@ async def _do_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, txt: str
 
 
 # ------------------------- main -------------------------
-async def _catch_up_recent_users(bot_instance):
-    """Deliver welcome message to recent users who clicked start while bot was bogged down."""
-    try:
-        await asyncio.sleep(5)
-        recent = await db.users.find({"searches": 0}).sort("_id", -1).limit(300).to_list(300)
-        log.info("Catching up with %d recent users who clicked start...", len(recent))
-        for u in recent:
-            tid = u.get("telegram_id")
-            if not tid:
-                continue
-            u_lang = u.get("lang") or "ar"
-            try:
-                await bot_instance.send_message(
-                    chat_id=tid,
-                    text=i18n.get_start_text(u_lang),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=i18n.get_main_keyboard(u_lang),
-                )
-                await asyncio.sleep(0.05)
-            except Exception:
-                pass
-        log.info("Catch-up complete.")
-    except Exception as e:
-        log.warning("Catch-up task error: %s", e)
-
-
 async def _preload_known_users():
     """Load existing users into in-memory set to prevent database queries during /start."""
     try:
@@ -1834,7 +1826,6 @@ async def _post_init(app: Application):
         log.warning("Default SEO setup failed: %s", e)
 
     await _preload_known_users()
-    asyncio.create_task(_catch_up_recent_users(app.bot))
 
 
 def main():
