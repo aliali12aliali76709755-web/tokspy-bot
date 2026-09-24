@@ -597,37 +597,55 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
 # ------------------------- text router -------------------------
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
+    msg = update.effective_message
+    if not msg:
+        return
+    text = (msg.text or msg.caption or "").strip()
     tid = update.effective_user.id
 
+    if is_admin(tid):
+        ADMIN_SESSIONS.add(tid)
+
     # ---- admin: pending states (password / broadcast / channel / grant) ----
-    if update.message.entities:
-        for ent in update.message.entities:
+    if msg.entities:
+        for ent in msg.entities:
             if ent.type == "custom_emoji":
-                await update.effective_message.reply_text(f"💡 ID الرمز التعبيري:\n`{ent.custom_emoji_id}`\n\n_اضغط لنسخه_", parse_mode="Markdown")
+                await msg.reply_text(f"💡 ID الرمز التعبيري:\n`{ent.custom_emoji_id}`\n\n_اضغط لنسخه_", parse_mode="Markdown")
                 return
     
     st = context.user_data.get("await")
     if st == "admin_pw":
         context.user_data.pop("await", None)
-        if text == ADMIN_PASSWORD:
+        if text == ADMIN_PASSWORD or is_admin(tid):
             ADMIN_SESSIONS.add(tid)
             return await admin_panel(update, context)
-        return await update.effective_message.reply_text("❌ كلمة سر خاطئة.")
-    if st == "broadcast" and tid in ADMIN_SESSIONS:
+        return await msg.reply_text("❌ كلمة سر خاطئة.")
+    if st == "broadcast" and is_admin(tid):
         context.user_data.pop("await", None)
-        return await _do_broadcast(update, context, text)
-    if st == "add_channel" and tid in ADMIN_SESSIONS:
+        return await _do_broadcast(update, context)
+    if st == "add_channel" and is_admin(tid):
         context.user_data.pop("await", None)
         return await _add_channel(update, context, text)
-    if st == "grant" and tid in ADMIN_SESSIONS:
+    if st == "grant" and is_admin(tid):
         context.user_data.pop("await", None)
         return await _do_grant(update, context, text)
 
-    # ---- admin entry trigger ----
-    if text in ("صويري", "صوري"):
-        context.user_data["await"] = "admin_pw"
-        return await update.effective_message.reply_text("🔐 أدخل كلمة السر للدخول للوحة التحكم:")
+    # ---- admin entry triggers ----
+    if is_admin(tid) and text.lower() in ("صويري", "صوري", "ادمن", "الادمن", "admin", "/admin", "/panel", "لوحة التحكم"):
+        ADMIN_SESSIONS.add(tid)
+        return await admin_panel(update, context)
+
+    if is_admin(tid) and text.lower() in ("اذاعة", "إذاعة", "اداعة", "broadcast", "/broadcast", "/bc"):
+        ADMIN_SESSIONS.add(tid)
+        context.user_data["await"] = "broadcast"
+        return await msg.reply_text(
+            "📢 <b>قسم الإذاعة الجماعية</b>\n\n"
+            "أرسل الآن الرسالة (نص، صورة، فيديو، أو رسالة محولة) التي تريد إذاعتها لكل مستخدمي البوت:",
+            parse_mode=ParseMode.HTML
+        )
+
+    if not text:
+        return
 
     # ---- forced subscription gate (applies to everything below) ----
     if not await ensure_subscribed(update, context):
@@ -1612,7 +1630,7 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------------- settings & forced subscription -------------------------
 def is_admin(tid: int) -> bool:
-    return tid == ADMIN_ID or tid in ADMIN_SESSIONS
+    return tid == ADMIN_ID or tid == SUPPORT_ID or tid in ADMIN_SESSIONS
 
 
 _settings_cache: dict = {"_id": "settings", "forced_channels": []}
@@ -1720,16 +1738,118 @@ async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("🔐 أدخل كلمة السر للدخول للوحة التحكم:")
 
 
-async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, msg: str):
-    users = await db.users.find({}).to_list(100000)
+async def _broadcast_worker(bot, admin_chat_id: int, status_msg_id: int, source_chat_id: int, source_msg_id: int, text_fallback: str):
+    import time
+    users = await db.users.find({}, {"telegram_id": 1}).to_list(100000)
+    total = len(users)
     sent = 0
-    for u in users:
+    blocked = 0
+    last_update = time.time()
+
+    for i, u in enumerate(users):
+        t_user = u.get("telegram_id")
+        if not t_user:
+            continue
         try:
-            await context.bot.send_message(u["telegram_id"], f"📢 {msg}")
+            if source_chat_id and source_msg_id:
+                await bot.copy_message(chat_id=t_user, from_chat_id=source_chat_id, message_id=source_msg_id)
+            else:
+                await bot.send_message(chat_id=t_user, text=text_fallback, parse_mode=ParseMode.HTML)
             sent += 1
+            await asyncio.sleep(0.04)  # ~25 msg/sec to prevent hitting Telegram rate limits
+        except RetryAfter as e:
+            log.warning("Broadcast FloodControl hit, waiting %s seconds", e.retry_after)
+            await asyncio.sleep(e.retry_after + 0.5)
+            try:
+                if source_chat_id and source_msg_id:
+                    await bot.copy_message(chat_id=t_user, from_chat_id=source_chat_id, message_id=source_msg_id)
+                else:
+                    await bot.send_message(chat_id=t_user, text=text_fallback, parse_mode=ParseMode.HTML)
+                sent += 1
+            except Exception:
+                blocked += 1
+        except Exception:
+            blocked += 1
+
+        if (i + 1) % 250 == 0 or (time.time() - last_update > 6):
+            last_update = time.time()
+            try:
+                pct = int(((i + 1) / total) * 100) if total else 0
+                await bot.edit_message_text(
+                    chat_id=admin_chat_id,
+                    message_id=status_msg_id,
+                    text=(
+                        f"⏳ <b>جاري إرسال الإذاعة الجماعية...</b>\n\n"
+                        f"📊 التقدّم: <b>{sent} / {total}</b> مستخدم\n"
+                        f"🚫 المحظورين/الملغيين: {blocked}\n"
+                        f"⏱ نسبة الإنجاز: {pct}%"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+    try:
+        await bot.edit_message_text(
+            chat_id=admin_chat_id,
+            message_id=status_msg_id,
+            text=(
+                f"✅ <b>اكتملت الإذاعة الجماعية بنجاح!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👥 إجمالي المستهدفين: <b>{total}</b> مستخدم\n"
+                f"📤 تم التسليم بنجاح: <b>{sent}</b> مستخدم\n"
+                f"🚫 حسابات محظورة/ملغية: <b>{blocked}</b>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+    except Exception:
+        try:
+            await bot.send_message(
+                chat_id=admin_chat_id,
+                text=f"✅ اكتملت الإذاعة الجماعية بنجاح!\n\nتم الإرسال إلى {sent} من أصل {total} مستخدم.",
+                reply_markup=admin_kb()
+            )
         except Exception:
             pass
-    await update.effective_message.reply_text(f"✅ تم إرسال الإذاعة إلى {sent} مستخدم.", reply_markup=admin_kb())
+
+
+async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    tid = update.effective_user.id
+    source_chat_id = update.effective_chat.id
+    source_msg_id = msg.message_id
+    text_fallback = (msg.text or msg.caption or "").strip()
+
+    status_msg = await msg.reply_text(
+        "🚀 <b>جاري بدء الإذاعة الجماعية...</b>\nيرجى الانتظار، سيتم إشعارك بالتقدّم مباشرة.",
+        parse_mode=ParseMode.HTML
+    )
+
+    asyncio.create_task(
+        _broadcast_worker(context.bot, tid, status_msg.message_id, source_chat_id, source_msg_id, text_fallback)
+    )
+
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    if not is_admin(tid):
+        return
+    ADMIN_SESSIONS.add(tid)
+    context.user_data["await"] = "broadcast"
+    await update.effective_message.reply_text(
+        "📢 <b>قسم الإذاعة الجماعية</b>\n\n"
+        "أرسل الآن الرسالة (نص، صورة، فيديو، أو رسالة محولة) التي تريد إذاعتها لكل مستخدمي البوت:",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    if not is_admin(tid):
+        return
+    ADMIN_SESSIONS.add(tid)
+    await admin_panel(update, context)
 
 
 async def _add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, ch: str):
@@ -1846,6 +1966,10 @@ def main():
     )
     app.add_error_handler(global_error_handler)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("panel", admin_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("bc", broadcast_cmd))
     app.add_handler(CommandHandler("lang", lang_cmd))
     app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CommandHandler("vip", show_vip))
@@ -1854,7 +1978,7 @@ def main():
     app.add_handler(CommandHandler("agency", agency_cmd))
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
+    app.add_handler(MessageHandler(~filters.COMMAND, router))
 
     app.job_queue.run_repeating(monitor_job, interval=180, first=20)
     app.job_queue.run_repeating(impersonation_job, interval=6 * 3600, first=300)
