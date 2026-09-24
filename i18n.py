@@ -11,7 +11,7 @@ SUPPORTED_LANGUAGES = ["ar", "en", "ru", "zh", "fa", "tr"]
 # SEO Metadata for Telegram Global Search ranking across languages
 BOT_SEO = {
     "ar": {
-        "name": "بوت كاشف حسابات تيك توك ومراقبة",
+        "name": "بوت معلومات تيك توك TikTok information",
         "short_description": "أقوى أداة تيك توك: كشف الحسابات، تحميل بدون علامة مائية، مراقبة التفاعلات والإحصائيات.",
         "description": (
             "🔥 أهلاً بك في البوت الأقوى والأسرع في تيليجرام لخدمات تيك توك!\n\n"
