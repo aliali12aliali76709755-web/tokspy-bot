@@ -8,6 +8,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import urllib.parse
 import json
 import re
+import queue
+import pymongo
+import certifi
 
 LOG_BUFFER = deque(maxlen=200)
 
@@ -28,15 +31,122 @@ root_logger.addHandler(buf_handler)
 import bot
 import tiktok_service as tk
 
+# Load landing page HTML template
+LANDING_HTML_PATH = os.path.join(os.path.dirname(__file__), "landing_page.html")
+try:
+    with open(LANDING_HTML_PATH, "r", encoding="utf-8") as f:
+        LANDING_PAGE_HTML = f.read().encode("utf-8")
+except Exception as e:
+    root_logger.error("Failed to read landing_page.html: %s", e)
+    LANDING_PAGE_HTML = b"<h1>TokSpy Telegram Bot</h1>"
+
+VISIT_QUEUE = queue.Queue()
+
+def visitor_flush_worker():
+    """Worker thread that flushes visitor analytics to MongoDB periodically without blocking HTTP requests."""
+    mongo_url = os.environ.get("MONGO_URL")
+    db_name = os.environ.get("DB_NAME", "tiktokbot")
+    if not mongo_url:
+        return
+    
+    col = None
+    while True:
+        try:
+            if col is None:
+                client = pymongo.MongoClient(mongo_url, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=5000)
+                col = client[db_name]["web_stats"]
+
+            items = []
+            try:
+                item = VISIT_QUEUE.get(timeout=2)
+                items.append(item)
+                while not VISIT_QUEUE.empty() and len(items) < 1000:
+                    items.append(VISIT_QUEUE.get_nowait())
+            except queue.Empty:
+                pass
+
+            if items:
+                total_inc = 0
+                clicks_inc = 0
+                sources = {}
+                for it in items:
+                    if it.get("click"):
+                        clicks_inc += 1
+                    else:
+                        total_inc += 1
+                        ref = it.get("ref", "direct")
+                        sources[ref] = sources.get(ref, 0) + 1
+
+                update_dict = {}
+                if total_inc > 0:
+                    update_dict["total_visits"] = total_inc
+                if clicks_inc > 0:
+                    update_dict["bot_clicks"] = clicks_inc
+                for s, cnt in sources.items():
+                    safe_key = re.sub(r'[\.\$]', '_', s)[:50]
+                    update_dict[f"sources.{safe_key}"] = cnt
+
+                if update_dict:
+                    col.update_one(
+                        {"_id": "global"},
+                        {
+                            "$inc": update_dict,
+                            "$set": {"last_visit": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                        },
+                        upsert=True
+                    )
+        except Exception as e:
+            root_logger.warning("visitor_flush_worker error: %s", e)
+            col = None
+            time.sleep(2)
+
+
 class HealthHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/click":
+            qs = urllib.parse.parse_qs(parsed.query)
+            ref = qs.get("ref", ["direct"])[0]
+            VISIT_QUEUE.put({"ref": ref, "click": True})
+            self.send_response(204)
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+
+        if parsed.path == "/click":
+            qs = urllib.parse.parse_qs(parsed.query)
+            ref = qs.get("ref", ["direct"])[0]
+            VISIT_QUEUE.put({"ref": ref, "click": True})
+            self.send_response(204)
+            self.end_headers()
+            return
+
         if parsed.path == "/logs":
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
             logs_text = "\n".join(LOG_BUFFER)
             self.wfile.write(logs_text.encode('utf-8'))
+            return
+
+        if parsed.path in ("/api/stats", "/stats"):
+            mongo_url = os.environ.get("MONGO_URL")
+            db_name = os.environ.get("DB_NAME", "tiktokbot")
+            try:
+                client = pymongo.MongoClient(mongo_url, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=2000)
+                doc = client[db_name]["web_stats"].find_one({"_id": "global"}) or {}
+                doc["_id"] = str(doc.get("_id"))
+                res = {"ok": True, "stats": doc}
+            except Exception as e:
+                res = {"ok": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
             return
 
         if parsed.path == "/debug_dl":
@@ -79,13 +189,24 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
             return
 
+        # Track visitor unless internal monitor/keepalive
+        ua = self.headers.get("User-Agent", "")
+        if "TokSpyKeepAlive" not in ua and "Render" not in ua:
+            qs = urllib.parse.parse_qs(parsed.query)
+            ref = qs.get("ref", ["direct"])[0]
+            VISIT_QUEUE.put({"ref": ref, "click": False})
+
+        # Serve landing page for / and any other route
         self.send_response(200)
-        self.send_header('Content-type', 'application/json; charset=utf-8')
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(LANDING_PAGE_HTML)))
         self.end_headers()
-        self.wfile.write(b'{"status": "ok", "bot": "TokSpy", "state": "running"}')
+        self.wfile.write(LANDING_PAGE_HTML)
 
     def do_HEAD(self):
         self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(LANDING_PAGE_HTML)))
         self.end_headers()
 
     def log_message(self, format, *args):
@@ -109,6 +230,9 @@ def keep_alive():
         time.sleep(600)
 
 if __name__ == "__main__":
+    t_flush = threading.Thread(target=visitor_flush_worker, daemon=True)
+    t_flush.start()
+
     t_http = threading.Thread(target=run_http_server, daemon=True)
     t_http.start()
 

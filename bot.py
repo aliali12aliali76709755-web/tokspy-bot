@@ -321,6 +321,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         args = getattr(context, "args", None)
         if args and args[0].startswith("ref_"):
             asyncio.create_task(_handle_referral(tid, args[0], context.bot))
+        elif args and args[0].startswith("web"):
+            asyncio.create_task(db.web_stats.update_one({"_id": "global"}, {"$inc": {"conversions": 1}}, upsert=True))
 
     if not await ensure_subscribed(update, context):
         return
@@ -1714,12 +1716,21 @@ async def _stats_counts():
 
 async def admin_stats_text() -> str:
     total, vips, mons, period, stars, npay = await _stats_counts()
+    web_doc = await db.web_stats.find_one({"_id": "global"}) or {}
+    web_visits = web_doc.get("total_visits", 0)
+    web_clicks = web_doc.get("bot_clicks", 0)
+    web_convs = web_doc.get("conversions", 0)
     return (
         "🛠 <b>لوحة التحكم — الإحصائيات</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"👥 إجمالي المستخدمين: <b>{total}</b> (البوت مجاني بالكامل 🎉)\n"
         f"🆕 اليوم: {period['اليوم']} | الأسبوع: {period['الأسبوع']}\n"
         f"🗓 الشهر: {period['الشهر']} | السنة: {period['السنة']}\n\n"
+        f"🌐 <b>إحصائيات رابط الموقع (Landing Page):</b>\n"
+        f"• الزيارات الإجمالية: <b>{web_visits}</b> زائر\n"
+        f"• نقرات زر التحويل: <b>{web_clicks}</b>\n"
+        f"• المستخدمين الفعليين (بدء البوت): <b>{web_convs}</b>\n"
+        f"🔗 الرابط: <code>https://tokspy-telegram-bot.onrender.com</code>\n\n"
         f"🔔 حسابات تحت المراقبة: {mons}"
     )
 
