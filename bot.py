@@ -96,6 +96,18 @@ async def _save_user_background(tid: int, tg_user):
         except Exception as e:
             log.warning("Background user save failed for %s: %s", tid, e)
 
+async def _record_web_conversion():
+    try:
+        await db.web_stats.update_one({"_id": "global"}, {"$inc": {"conversions": 1}}, upsert=True)
+    except Exception as e:
+        log.warning("Failed to record web conversion: %s", e)
+
+async def _save_user_lang_bg(tid: int, lang: str):
+    try:
+        await db.users.update_one({"telegram_id": tid}, {"$set": {"lang": lang}}, upsert=True)
+    except Exception as e:
+        log.warning("Failed to save user lang for %s: %s", tid, e)
+
 async def _handle_referral(tid: int, arg: str, bot_instance):
     try:
         ref = int(arg[4:])
@@ -314,15 +326,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tid = user.id
 
+    args = getattr(context, "args", None)
+    if args and args[0].startswith("web"):
+        asyncio.create_task(_record_web_conversion())
+
     # Fast in-memory check: zero database round-trips for existing users
     if tid not in KNOWN_USERS:
         KNOWN_USERS.add(tid)
         asyncio.create_task(_save_user_background(tid, user))
-        args = getattr(context, "args", None)
         if args and args[0].startswith("ref_"):
             asyncio.create_task(_handle_referral(tid, args[0], context.bot))
-        elif args and args[0].startswith("web"):
-            asyncio.create_task(db.web_stats.update_one({"_id": "global"}, {"$inc": {"conversions": 1}}, upsert=True))
 
     if not await ensure_subscribed(update, context):
         return
@@ -760,7 +773,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_lang = arg if arg in i18n.SUPPORTED_LANGUAGES else "ar"
         if context and context.user_data is not None:
             context.user_data["lang"] = new_lang
-        asyncio.create_task(db.users.update_one({"telegram_id": tid}, {"$set": {"lang": new_lang}}, upsert=True))
+        asyncio.create_task(_save_user_lang_bg(tid, new_lang))
         confirm_txt = i18n.get_msg(new_lang, "lang_selected")
         await q.answer(confirm_txt)
         start_txt = i18n.get_start_text(new_lang)
@@ -1917,7 +1930,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     elif isinstance(err, (TimedOut, NetworkError)):
         log.warning("Telegram network glitch: %s", err)
     else:
-        log.error("Unhandled exception: %s", err)
+        log.error("Unhandled exception: %s", err, exc_info=err)
 
 
 async def _post_init(app: Application):
