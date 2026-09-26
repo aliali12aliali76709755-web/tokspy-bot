@@ -218,16 +218,30 @@ def run_http_server():
     server.serve_forever()
 
 def keep_alive():
+    """Ping the service every 120s to ensure Render never puts the instance to sleep."""
     url = "https://tokspy-telegram-bot.onrender.com"
-    time.sleep(120)
+    time.sleep(30)
     while True:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "TokSpyKeepAlive/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 pass
-        except Exception:
-            pass
-        time.sleep(600)
+        except Exception as e:
+            root_logger.warning("KeepAlive ping notice: %s", e)
+        time.sleep(120)
+
+def run_bot_supervised():
+    """Supervisor thread to auto-restart the bot immediately if it ever crashes."""
+    while True:
+        try:
+            root_logger.info("Starting bot application (supervised)...")
+            bot.main()
+        except (KeyboardInterrupt, SystemExit):
+            root_logger.info("Bot stopped intentionally.")
+            break
+        except Exception as e:
+            root_logger.critical("Bot process crashed: %s. Auto-recovering in 3 seconds...", e, exc_info=True)
+            time.sleep(3)
 
 if __name__ == "__main__":
     t_flush = threading.Thread(target=visitor_flush_worker, daemon=True)
@@ -239,4 +253,4 @@ if __name__ == "__main__":
     t_ping = threading.Thread(target=keep_alive, daemon=True)
     t_ping.start()
 
-    bot.main()
+    run_bot_supervised()

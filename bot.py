@@ -1636,7 +1636,7 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     async def worker(m):
         async with sem:
             try:
-                await _process_single_monitor(context, m)
+                await asyncio.wait_for(_process_single_monitor(context, m), timeout=30.0)
             except Exception as e:
                 log.warning("monitor job worker error: %s", e)
                 
@@ -1932,6 +1932,18 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     else:
         log.error("Unhandled exception: %s", err, exc_info=err)
 
+    if isinstance(update, Update):
+        if update.callback_query:
+            try:
+                await update.callback_query.answer("⚠️ حدث خطأ مؤقت، يرجى إعادة المحاولة.", show_alert=False)
+            except Exception:
+                pass
+        elif update.effective_message:
+            try:
+                await update.effective_message.reply_text("⚠️ حدث خطأ مؤقت أثناء معالجة الطلب، يرجى إرسال /start للمتابعة.")
+            except Exception:
+                pass
+
 
 async def _post_init(app: Application):
     """Register multilingual Bot SEO and commands for global search ranking."""
@@ -2009,7 +2021,7 @@ def main():
     app.job_queue.run_repeating(weekly_report_job, interval=7 * 24 * 3600, first=600)
 
     log.info("Bot starting (high-concurrency polling)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False, bootstrap_retries=-1)
 
 
 if __name__ == "__main__":
