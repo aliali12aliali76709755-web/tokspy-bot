@@ -479,8 +479,10 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         return
 
     author = data.get("author", {})
-    uid = author.get("unique_id", "")
+    uid = author.get("unique_id", "") or author.get("uniqueId", "")
     prof = await tk.fetch_profile(uid) if uid else None
+    if not uid and prof:
+        uid = prof.get("uniqueId", "")
 
     likes = data.get("digg_count") or 0
     comments = data.get("comment_count") or 0
@@ -492,10 +494,13 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
     import datetime
     ts = data.get('create_time')
+    if not ts and (data.get("id") or data.get("video_id")):
+        ts = tk.extract_snowflake_timestamp(data.get("id") or data.get("video_id"))
+
     if ts:
-        dt = datetime.datetime.fromtimestamp(ts)
+        dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
         date_str = dt.strftime("%Y-%m-%d")
-        time_str = dt.strftime("%H:%M:%S")
+        time_str = dt.strftime("%H:%M:%S (UTC)")
     else:
         date_str = "—"
         time_str = "—"
@@ -514,7 +519,7 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     if raw_bio.startswith("TikTok video #") or raw_bio.startswith("TikTok photo #"):
         raw_bio = ""
     bio = _clean_str(raw_bio) or "—"
-    acc_id = prof.get("id", "—") if prof else "—"
+    acc_id = (prof.get("id") if prof else None) or author.get("id") or "—"
 
     # caption: strictly as user requested
     lines = [

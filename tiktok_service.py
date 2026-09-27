@@ -48,67 +48,121 @@ def _to_int(v, default=0):
         return default
 
 
+def extract_snowflake_timestamp(post_id: str | int | None) -> int | None:
+    """Extract creation timestamp from TikTok 64-bit snowflake ID."""
+    if not post_id:
+        return None
+    try:
+        pid = int(str(post_id).strip())
+        if pid > 1000000000000000:
+            ts = pid >> 32
+            if 1451606400 <= ts <= 2051222400:  # Valid Unix timestamp 2016-2035
+                return ts
+    except Exception:
+        pass
+    return None
+
+
 async def fetch_profile(username: str) -> dict | None:
     """Return a normalized profile dict for a username, or None if not found."""
     username = clean_username(username)
     if not username:
         return None
     user, stats = None, None
-    # 1) Direct scrape with curl_cffi (rich fields, 0.4s fast bypass)
-    try:
-        from curl_cffi.requests import AsyncSession
-        headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        async with AsyncSession(impersonate="safari15_5") as s:
-            r = await s.get(f"https://www.tiktok.com/@{username}", headers=headers, timeout=10)
-            if r.status_code == 200:
-                m = _RE.search(r.text)
-                if m:
-                    data = json.loads(m.group(1))
-                    info = (
-                        data.get("__DEFAULT_SCOPE__", {})
-                        .get("webapp.user-detail", {})
-                        .get("userInfo", {})
-                    )
-                    if info.get("user"):
-                        user = info["user"]
-                        stats = info.get("statsV2") or info.get("stats") or {}
-    except Exception:
-        pass
 
-    # 2) tikwm fallback / stats enrichment (only if scrape incomplete)
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cx:
-        if user is None or not stats or not stats.get("followerCount"):
-            try:
-                r = await cx.post(
+    # 1) Countik public API (fast, reliable on datacenter IPs without blocking)
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cx:
+            rc = await cx.get(
+                f"https://countik.com/api/exist/{username}",
+                headers={"User-Agent": _UA},
+            )
+            if rc.status_code == 200:
+                cj = rc.json()
+                if cj.get("status") == "success":
+                    uid_str = str(cj.get("id") or "")
+                    ctime = extract_snowflake_timestamp(uid_str)
+                    user = {
+                        "uniqueId": cj.get("uniqueId") or username,
+                        "id": uid_str,
+                        "secUid": cj.get("sec_uid", ""),
+                        "nickname": cj.get("nickname", ""),
+                        "signature": cj.get("signature", ""),
+                        "avatarThumb": cj.get("avatarThumb"),
+                        "avatarMedium": cj.get("avatarThumb"),
+                        "avatarLarger": cj.get("avatarThumb"),
+                        "verified": bool(cj.get("verified")),
+                        "createTime": ctime,
+                    }
+                    stats = {
+                        "followerCount": cj.get("followerCount", 0),
+                        "followingCount": cj.get("followingCount", 0),
+                        "heartCount": cj.get("heartCount", 0),
+                        "videoCount": cj.get("videoCount", 0),
+                        "diggCount": 0,
+                        "friendCount": 0,
+                    }
+    except Exception as e:
+        log.warning("Countik fetch_profile error for %s: %s", username, e)
+
+    # 2) Direct scrape with curl_cffi (rich fields, 0.4s fast bypass)
+    if user is None or not stats or not stats.get("followerCount"):
+        try:
+            from curl_cffi.requests import AsyncSession
+            headers = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            async with AsyncSession(impersonate="safari15_5") as s:
+                r = await s.get(f"https://www.tiktok.com/@{username}", headers=headers, timeout=10)
+                if r.status_code == 200:
+                    m = _RE.search(r.text)
+                    if m:
+                        data = json.loads(m.group(1))
+                        info = (
+                            data.get("__DEFAULT_SCOPE__", {})
+                            .get("webapp.user-detail", {})
+                            .get("userInfo", {})
+                        )
+                        if info.get("user"):
+                            user = info["user"]
+                            stats = info.get("statsV2") or info.get("stats") or {}
+        except Exception:
+            pass
+
+    # 3) tikwm fallback / stats enrichment
+    if user is None or not stats or not stats.get("followerCount"):
+        try:
+            from curl_cffi.requests import AsyncSession
+            async with AsyncSession(impersonate="chrome120") as s:
+                r = await s.post(
                     "https://www.tikwm.com/api/user/info",
                     data={"unique_id": username},
-                    headers={"User-Agent": _UA},
+                    timeout=10,
                 )
-                j = r.json()
-                if j.get("code") == 0:
-                    d = j["data"]
-                    st = d.get("stats", {})
-                    tikwm_stats = {
-                        "followerCount": st.get("followerCount"),
-                        "followingCount": st.get("followingCount"),
-                        "heartCount": st.get("heartCount"),
-                        "videoCount": st.get("videoCount"),
-                        "diggCount": st.get("diggCount"),
-                        "friendCount": st.get("friendCount", 0),
-                    }
-                    if user is None:
-                        user = d.get("user", {})
-                        stats = tikwm_stats
-                    else:
-                        stats = tikwm_stats
-            except Exception:
-                pass
+                if r.status_code == 200:
+                    j = r.json()
+                    if j.get("code") == 0:
+                        d = j["data"]
+                        st = d.get("stats", {})
+                        tikwm_stats = {
+                            "followerCount": st.get("followerCount"),
+                            "followingCount": st.get("followingCount"),
+                            "heartCount": st.get("heartCount"),
+                            "videoCount": st.get("videoCount"),
+                            "diggCount": st.get("diggCount"),
+                            "friendCount": st.get("friendCount", 0),
+                        }
+                        if user is None:
+                            user = d.get("user", {})
+                            stats = tikwm_stats
+                        else:
+                            stats = tikwm_stats
+        except Exception:
+            pass
 
-    # 3) Headless browser fallback (bypasses TikTok WAF/Cloudflare)
+    # 4) Headless browser fallback
     if user is None or not stats or not stats.get("followerCount"):
         try:
             import browser_fetch as BF
@@ -179,28 +233,30 @@ def _normalize(user: dict, stats: dict) -> dict:
 async def search_users(keywords: str, count: int = 20) -> list[dict]:
     """Search TikTok accounts by keyword/name. Returns lite profile dicts."""
     out = []
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cx:
-        try:
-            r = await cx.get(
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession(impersonate="chrome120") as s:
+            r = await s.get(
                 "https://www.tikwm.com/api/user/search",
                 params={"keywords": keywords, "count": count},
-                headers={"User-Agent": _UA},
+                timeout=12,
             )
-            j = r.json()
-            if j.get("code") == 0:
-                for item in j["data"].get("user_list", []):
-                    u = item.get("user", {})
-                    st = item.get("stats", {})
-                    out.append({
-                        "uniqueId": u.get("uniqueId", ""),
-                        "nickname": u.get("nickname", ""),
-                        "avatar": u.get("avatarMedium") or u.get("avatarThumb"),
-                        "verified": bool(u.get("verified")),
-                        "region": u.get("region", ""),
-                        "followerCount": _to_int(st.get("followerCount")),
-                    })
-        except Exception:
-            pass
+            if r.status_code == 200:
+                j = r.json()
+                if j.get("code") == 0:
+                    for item in j["data"].get("user_list", []):
+                        u = item.get("user", {})
+                        st = item.get("stats", {})
+                        out.append({
+                            "uniqueId": u.get("uniqueId", ""),
+                            "nickname": u.get("nickname", ""),
+                            "avatar": u.get("avatarMedium") or u.get("avatarThumb"),
+                            "verified": bool(u.get("verified")),
+                            "region": u.get("region", ""),
+                            "followerCount": _to_int(st.get("followerCount")),
+                        })
+    except Exception as e:
+        log.warning("search_users error: %s", e)
     return out
 
 
@@ -497,6 +553,13 @@ async def download_video(url: str) -> dict | None:
     post_id = ""
     author_uid = ""
 
+    m_id_init = re.search(r'/(?:video|photo)/(\d+)', url)
+    if m_id_init:
+        post_id = m_id_init.group(1)
+    m_u_init = re.search(r'tiktok\.com/@([\w\.\-]+)', url)
+    if m_u_init:
+        author_uid = m_u_init.group(1)
+
     mobile_headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -549,224 +612,193 @@ async def download_video(url: str) -> dict | None:
         except Exception:
             pass
 
-    # Step 2: If photo post, extract images
-    if is_photo or (item_struct and item_struct.get("imagePost", {}).get("images")):
-        # Method A: Direct itemStruct images
-        if item_struct and item_struct.get("imagePost", {}).get("images"):
-            image_post = item_struct.get("imagePost", {})
-            raw_images = image_post.get("images", [])
-            image_urls = []
-            for img in raw_images:
-                u_list = img.get("imageURL", {}).get("urlList", [])
-                if u_list:
-                    image_urls.append(u_list[0])
-            if image_urls:
-                stats = item_struct.get("stats", {})
-                author = item_struct.get("author", {})
-                music_info = item_struct.get("music", {})
-                author_n = "".join(ch for ch in str(author.get("nickname", "")) if ch not in ("\ufffc", "\ufffd")).strip() or author.get("uniqueId", author_uid)
-                t_desc = "".join(ch for ch in str(item_struct.get("desc", "")) if ch not in ("\ufffc", "\ufffd")).strip()
-                return {
-                    "id": str(item_struct.get("id") or post_id or ""),
-                    "title": t_desc,
-                    "play": None,
-                    "video_path": None,
-                    "images": image_urls,
-                    "music": music_info.get("playUrl"),
-                    "music_info": {"play": music_info.get("playUrl"), "title": music_info.get("title")},
-                    "author": {"unique_id": author.get("uniqueId", author_uid), "nickname": author_n},
-                    "create_time": int(item_struct.get("createTime") or 0) if item_struct.get("createTime") else None,
-                    "play_count": stats.get("playCount", 0),
-                    "digg_count": stats.get("diggCount", 0),
-                    "comment_count": stats.get("commentCount", 0),
-                    "share_count": stats.get("shareCount", 0),
-                    "collect_count": stats.get("collectCount", 0),
-                    "download_count": 0,
-                }
+    snowflake_ts = extract_snowflake_timestamp(post_id)
 
-        # Method B: SSSTik scraper for photo slides
-        ss = await _scrape_ssstik(url)
-        if ss and ss.get("images"):
-            prof = await fetch_profile(author_uid) if author_uid else None
-            author_nick = (prof.get("nickname") if prof else "") or author_uid
-            return {
-                "id": post_id or "",
-                "title": ss.get("title") or "",
-                "play": None,
-                "video_path": None,
-                "images": ss["images"],
-                "music": ss.get("music"),
-                "music_info": {"play": ss.get("music")},
-                "author": {"unique_id": author_uid, "nickname": author_nick},
-                "create_time": None,
-                "play_count": 0,
-                "digg_count": 0,
-                "comment_count": 0,
-                "share_count": 0,
-                "collect_count": 0,
-                "download_count": 0,
-            }
-
-        # Method C: TikVideo scraper for photo slides
-        tv = await _scrape_tikvideo(url)
-        if tv and tv.get("images"):
-            prof = await fetch_profile(author_uid) if author_uid else None
-            author_nick = (prof.get("nickname") if prof else "") or author_uid
-            return {
-                "id": post_id or "",
-                "title": tv.get("title") or "",
-                "play": None,
-                "video_path": None,
-                "images": tv["images"],
-                "music": tv.get("music"),
-                "music_info": {"play": tv.get("music")},
-                "author": {"unique_id": author_uid, "nickname": author_nick},
-                "create_time": None,
-                "play_count": 0,
-                "digg_count": 0,
-                "comment_count": 0,
-                "share_count": 0,
-                "collect_count": 0,
-                "download_count": 0,
-            }
-
-    # Step 3: For videos -> Try high-speed engines (bypasses datacenter Cloudflare/TikTok blocks!)
-    # Engine 1: TikVideo (direct download to disk)
-    tv = await _scrape_tikvideo(url)
-    if tv and (tv.get("video_path") or tv.get("play")):
-        prof = await fetch_profile(author_uid) if author_uid else None
-        author_nick = (prof.get("nickname") if prof else "") or author_uid
-        stats = item_struct.get("stats", {}) if item_struct else {}
-        return {
-            "id": post_id or "",
-            "title": (item_struct.get("desc") if item_struct else "") or tv.get("title") or "",
-            "play": tv.get("play"),
-            "video_path": tv.get("video_path"),
-            "images": tv.get("images") or [],
-            "music": tv.get("music"),
-            "music_info": {"play": tv.get("music")},
-            "author": {"unique_id": author_uid, "nickname": author_nick},
-            "create_time": int(item_struct.get("createTime") or 0) if (item_struct and item_struct.get("createTime")) else None,
-            "play_count": stats.get("playCount", 0),
-            "digg_count": stats.get("diggCount", 0),
-            "comment_count": stats.get("commentCount", 0),
-            "share_count": stats.get("shareCount", 0),
-            "collect_count": stats.get("collectCount", 0),
-            "download_count": 0,
-        }
-
-    # Engine 2: MusicalDown (direct download to disk)
-    md = await _scrape_musicaldown(url)
-    if md and (md.get("video_path") or md.get("play")):
-        prof = await fetch_profile(author_uid) if author_uid else None
-        author_nick = (prof.get("nickname") if prof else "") or author_uid
-        stats = item_struct.get("stats", {}) if item_struct else {}
-        return {
-            "id": post_id or "",
-            "title": (item_struct.get("desc") if item_struct else "") or md.get("title") or "",
-            "play": md.get("play"),
-            "video_path": md.get("video_path"),
-            "images": md.get("images") or [],
-            "music": md.get("music"),
-            "music_info": {"play": md.get("music")},
-            "author": {"unique_id": author_uid, "nickname": author_nick},
-            "create_time": int(item_struct.get("createTime") or 0) if (item_struct and item_struct.get("createTime")) else None,
-            "play_count": stats.get("playCount", 0),
-            "digg_count": stats.get("diggCount", 0),
-            "comment_count": stats.get("commentCount", 0),
-            "share_count": stats.get("shareCount", 0),
-            "collect_count": stats.get("collectCount", 0),
-            "download_count": 0,
-        }
-
-    # Engine 3: yt-dlp
-    try:
-        import yt_dlp
-        loop = asyncio.get_event_loop()
-        tmp_dir = tempfile.mkdtemp(prefix="tokspy_")
-        out_tmpl = os.path.join(tmp_dir, "%(id)s.%(ext)s")
-
-        ytdl_target = real_url
-        if is_photo and post_id and author_uid:
-            ytdl_target = f"https://www.tiktok.com/@{author_uid}/video/{post_id}"
-
-        def _download_ytdl():
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "outtmpl": out_tmpl,
-                "format": "bestvideo+bestaudio/best",
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(ytdl_target, download=True)
-                fpath = ydl.prepare_filename(info)
-                return info, fpath
-
-        info, video_path = await loop.run_in_executor(None, _download_ytdl)
-        if os.path.exists(video_path):
-            uid = (item_struct.get("author", {}).get("uniqueId") if item_struct else "") or author_uid or info.get("uploader_id") or info.get("uploader") or ""
-            author_nick = (item_struct.get("author", {}).get("nickname") if item_struct else "") or info.get("uploader") or uid
-            stats = item_struct.get("stats", {}) if item_struct else {}
-
-            return {
-                "id": str(info.get("id") or post_id or (item_struct.get("id") if item_struct else "") or ""),
-                "title": (item_struct.get("desc") if item_struct else "") or info.get("title") or info.get("description") or "",
-                "play": info.get("url"),
-                "video_path": video_path,
-                "images": [],
-                "music": None,
-                "author": {"unique_id": uid, "nickname": author_nick},
-                "create_time": (int(item_struct.get("createTime") or 0) if item_struct else None) or info.get("timestamp"),
-                "duration": info.get("duration"),
-                "play_count": stats.get("playCount") or info.get("view_count", 0),
-                "digg_count": stats.get("diggCount") or info.get("like_count", 0),
-                "comment_count": stats.get("commentCount") or info.get("comment_count", 0),
-                "share_count": stats.get("shareCount") or info.get("repost_count", 0),
-                "collect_count": stats.get("collectCount", 0),
-                "download_count": 0,
-            }
-    except Exception as e:
-        log.warning("yt-dlp download failed for %s: %s", url, e)
-
-    # Engine 4: Direct item_struct video URLs
-    if item_struct:
-        video = item_struct.get("video", {})
-        play_url = video.get("playAddr") or video.get("downloadAddr")
-        if not play_url and video.get("bitrate"):
-            play_url = video["bitrate"][0].get("playAddr", {}).get("urlList", [None])[0]
-        if play_url:
-            stats = item_struct.get("stats", {})
-            author = item_struct.get("author", {})
-            music_info = item_struct.get("music", {})
-            return {
-                "id": str(item_struct.get("id") or ""),
-                "title": item_struct.get("desc") or "",
-                "play": play_url,
-                "video_path": None,
-                "images": [],
-                "music": music_info.get("playUrl"),
-                "music_info": {"play": music_info.get("playUrl"), "title": music_info.get("title")},
-                "author": {"unique_id": author.get("uniqueId", author_uid), "nickname": author.get("nickname", author_uid)},
-                "create_time": int(item_struct.get("createTime") or 0) if item_struct.get("createTime") else None,
-                "duration": video.get("duration"),
-                "play_count": stats.get("playCount", 0),
-                "digg_count": stats.get("diggCount", 0),
-                "comment_count": stats.get("commentCount", 0),
-                "share_count": stats.get("shareCount", 0),
-                "collect_count": stats.get("collectCount", 0),
-                "download_count": 0,
-            }
-
-    # Engine 5: tikwm fallback
+    # Step 2: Query TikWM via curl_cffi (impersonate="chrome120") for full metadata and media
+    tikwm_meta = None
     try:
         from curl_cffi.requests import AsyncSession
         async with AsyncSession(impersonate="chrome120") as s:
-            r = await s.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}, timeout=12)
+            r = await s.post("https://www.tikwm.com/api/", data={"url": real_url, "hd": "1"}, timeout=12)
             if r.status_code == 200:
                 j = r.json()
-                if j.get("code") == 0:
-                    return j["data"]
-    except Exception:
-        pass
+                if j.get("code") == 0 and j.get("data"):
+                    tikwm_meta = j["data"]
+    except Exception as e:
+        log.warning("tikwm api query error: %s", e)
+
+    meta_id = (tikwm_meta.get("id") if tikwm_meta else None) or post_id or ""
+    if not snowflake_ts and meta_id:
+        snowflake_ts = extract_snowflake_timestamp(meta_id)
+
+    meta_views = _to_int(tikwm_meta.get("play_count")) if tikwm_meta else (item_struct.get("stats", {}).get("playCount", 0) if item_struct else 0)
+    meta_likes = _to_int(tikwm_meta.get("digg_count")) if tikwm_meta else (item_struct.get("stats", {}).get("diggCount", 0) if item_struct else 0)
+    meta_comments = _to_int(tikwm_meta.get("comment_count")) if tikwm_meta else (item_struct.get("stats", {}).get("commentCount", 0) if item_struct else 0)
+    meta_shares = _to_int(tikwm_meta.get("share_count")) if tikwm_meta else (item_struct.get("stats", {}).get("shareCount", 0) if item_struct else 0)
+    meta_saves = _to_int(tikwm_meta.get("collect_count")) if tikwm_meta else (item_struct.get("stats", {}).get("collectCount", 0) if item_struct else 0)
+    meta_downloads = _to_int(tikwm_meta.get("download_count")) if tikwm_meta else 0
+    meta_create_time = (_to_int(tikwm_meta.get("create_time")) if tikwm_meta else None) or (_to_int(item_struct.get("createTime")) if item_struct else None) or snowflake_ts
+
+    author_info = (tikwm_meta.get("author") if tikwm_meta else None) or (item_struct.get("author") if item_struct else None) or {}
+    meta_author_uid = author_info.get("unique_id") or author_info.get("uniqueId") or author_uid
+    meta_author_nick = author_info.get("nickname") or ""
+    meta_title = (tikwm_meta.get("title") if tikwm_meta else None) or (item_struct.get("desc") if item_struct else None) or ""
+    meta_music = (tikwm_meta.get("music") if tikwm_meta else None) or (item_struct.get("music", {}).get("playUrl") if item_struct else None)
+    meta_music_info = (tikwm_meta.get("music_info") if tikwm_meta else None) or ({"play": meta_music} if meta_music else {})
+
+    if not meta_author_nick and meta_author_uid:
+        prof = await fetch_profile(meta_author_uid)
+        if prof:
+            meta_author_nick = prof.get("nickname") or meta_author_uid
+            if not author_info.get("id"):
+                author_info["id"] = prof.get("id", "")
+
+    # Step 3: Check if Photo post / Slideshow
+    images = (tikwm_meta.get("images") if tikwm_meta else None) or []
+    if not images and item_struct and item_struct.get("imagePost", {}).get("images"):
+        for img in item_struct["imagePost"]["images"]:
+            u_list = img.get("imageURL", {}).get("urlList", [])
+            if u_list and u_list[0] not in images:
+                images.append(u_list[0])
+
+    if not images and is_photo:
+        ss = await _scrape_ssstik(real_url)
+        if ss and ss.get("images"):
+            images = ss["images"]
+            if not meta_music:
+                meta_music = ss.get("music")
+                meta_music_info = {"play": meta_music}
+            if not meta_title:
+                meta_title = ss.get("title") or ""
+
+    if not images and is_photo:
+        tv = await _scrape_tikvideo(real_url)
+        if tv and tv.get("images"):
+            images = tv["images"]
+            if not meta_music:
+                meta_music = tv.get("music")
+                meta_music_info = {"play": meta_music}
+            if not meta_title:
+                meta_title = tv.get("title") or ""
+
+    if images:
+        return {
+            "id": meta_id,
+            "title": meta_title,
+            "play": None,
+            "video_path": None,
+            "images": images,
+            "music": meta_music,
+            "music_info": meta_music_info,
+            "author": {"unique_id": meta_author_uid, "nickname": meta_author_nick, "id": author_info.get("id", "")},
+            "create_time": meta_create_time,
+            "play_count": meta_views,
+            "digg_count": meta_likes,
+            "comment_count": meta_comments,
+            "share_count": meta_shares,
+            "collect_count": meta_saves,
+            "download_count": meta_downloads,
+        }
+
+    # Step 4: Video post -> Download video file
+    video_path = None
+    play_url = (tikwm_meta.get("play") if tikwm_meta else None) or (tikwm_meta.get("hdplay") if tikwm_meta else None)
+
+    # Try downloading video from TikWM play link
+    if play_url and "tiktokcdn" in play_url:
+        try:
+            tmp_dir = tempfile.mkdtemp(prefix="tokspy_")
+            tmp_file = os.path.join(tmp_dir, f"{int(time.time()*1000)}.mp4")
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cx:
+                resp = await cx.get(play_url, headers={"User-Agent": _UA, "Referer": "https://www.tiktok.com/"})
+                if resp.status_code == 200 and len(resp.content) > 10000:
+                    with open(tmp_file, "wb") as f:
+                        f.write(resp.content)
+                    video_path = tmp_file
+        except Exception as e:
+            log.warning("tikwm direct video download error: %s", e)
+
+    # Fallback Engine A: TikVideo (direct download to disk)
+    if not video_path:
+        tv = await _scrape_tikvideo(url)
+        if tv:
+            if tv.get("video_path") and os.path.exists(tv["video_path"]):
+                video_path = tv["video_path"]
+            if not play_url:
+                play_url = tv.get("play")
+            if not meta_title:
+                meta_title = tv.get("title") or ""
+            if not meta_music:
+                meta_music = tv.get("music")
+                meta_music_info = {"play": meta_music}
+
+    # Fallback Engine B: MusicalDown (direct download to disk)
+    if not video_path:
+        md = await _scrape_musicaldown(url)
+        if md:
+            if md.get("video_path") and os.path.exists(md["video_path"]):
+                video_path = md["video_path"]
+            if not play_url:
+                play_url = md.get("play")
+            if not meta_music:
+                meta_music = md.get("music")
+                meta_music_info = {"play": meta_music}
+
+    # Fallback Engine C: yt-dlp
+    if not video_path:
+        try:
+            import yt_dlp
+            loop = asyncio.get_event_loop()
+            tmp_dir = tempfile.mkdtemp(prefix="tokspy_")
+            out_tmpl = os.path.join(tmp_dir, "%(id)s.%(ext)s")
+
+            def _download_ytdl():
+                ydl_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "outtmpl": out_tmpl,
+                    "format": "bestvideo+bestaudio/best",
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(real_url, download=True)
+                    fpath = ydl.prepare_filename(info)
+                    return info, fpath
+
+            info, fpath = await loop.run_in_executor(None, _download_ytdl)
+            if os.path.exists(fpath):
+                video_path = fpath
+                if not play_url:
+                    play_url = info.get("url")
+                if not meta_views:
+                    meta_views = info.get("view_count", 0)
+                if not meta_likes:
+                    meta_likes = info.get("like_count", 0)
+                if not meta_comments:
+                    meta_comments = info.get("comment_count", 0)
+                if not meta_shares:
+                    meta_shares = info.get("repost_count", 0)
+                if not meta_create_time:
+                    meta_create_time = info.get("timestamp") or snowflake_ts
+        except Exception as e:
+            log.warning("yt-dlp fallback failed: %s", e)
+
+    if video_path or play_url:
+        return {
+            "id": meta_id,
+            "title": meta_title,
+            "play": play_url,
+            "video_path": video_path,
+            "images": [],
+            "music": meta_music,
+            "music_info": meta_music_info,
+            "author": {"unique_id": meta_author_uid, "nickname": meta_author_nick, "id": author_info.get("id", "")},
+            "create_time": meta_create_time,
+            "play_count": meta_views,
+            "digg_count": meta_likes,
+            "comment_count": meta_comments,
+            "share_count": meta_shares,
+            "collect_count": meta_saves,
+            "download_count": meta_downloads,
+        }
 
     return None

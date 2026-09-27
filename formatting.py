@@ -93,6 +93,17 @@ def profile_card(p: dict) -> str:
     lang = esc(p.get("language")) or "غير متاح"
     cat = esc(p.get("category")) or "—"
 
+    create_time = p.get('createTime')
+    if not create_time and p.get('id'):
+        try:
+            pid = int(str(p['id']).strip())
+            if pid > 1000000000000000:
+                calc_ts = pid >> 32
+                if 1451606400 <= calc_ts <= 2051222400:
+                    create_time = calc_ts
+        except Exception:
+            pass
+
     lines = [
         f"🎵 <b>معلومات حساب تيك توك</b>  {label}",
         "━━━━━━━━━━━━━━━━━━",
@@ -106,7 +117,7 @@ def profile_card(p: dict) -> str:
         f"❤️ <b>الإعجابات:</b> {fmt_num(p.get('heartCount'))}",
         f"🎬 <b>الفيديوهات:</b> {fmt_num(p.get('videoCount'))}",
         "",
-        f"📅 <b>تاريخ الإنشاء:</b> {fmt_ts(p.get('createTime'))}",
+        f"📅 <b>تاريخ الإنشاء:</b> {fmt_ts(create_time)}",
         f"✏️ <b>تعديل اليوزر:</b> {fmt_ts(p.get('uniqueIdModifyTime'))}",
         f"✏️ <b>تعديل الاسم:</b> {fmt_ts(p.get('nickNameModifyTime'))}",
         f"🌍 <b>الدولة:</b> {region}",

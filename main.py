@@ -149,6 +149,24 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
             return
 
+        if parsed.path == "/debug_profile":
+            qs = urllib.parse.parse_qs(parsed.query)
+            u = qs.get("u", ["wirtschaftsfakten"])[0]
+            import asyncio
+            import tiktok_service as tk
+            async def run_prof():
+                try:
+                    p = await tk.fetch_profile(u)
+                    return {"ok": bool(p), "profile": p}
+                except Exception as e:
+                    return {"ok": False, "error": str(e)}
+            res = asyncio.run(run_prof())
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            return
+
         if parsed.path == "/debug_dl":
             qs = urllib.parse.parse_qs(parsed.query)
             url = qs.get("url", ["https://vm.tiktok.com/ZN86HLRrs/"])[0]
@@ -162,7 +180,20 @@ class HealthHandler(BaseHTTPRequestHandler):
                     data = await tk.download_video(url)
                     dbg_res["tk_download"] = bool(data)
                     if data:
-                        return {"ok": True, "data_keys": list(data.keys()), "id": data.get("id"), "play": bool(data.get("play")), "video_path": bool(data.get("video_path"))}
+                        return {
+                            "ok": True,
+                            "id": data.get("id"),
+                            "views": data.get("play_count"),
+                            "likes": data.get("digg_count"),
+                            "comments": data.get("comment_count"),
+                            "saves": data.get("collect_count"),
+                            "shares": data.get("share_count"),
+                            "create_time": data.get("create_time"),
+                            "author": data.get("author"),
+                            "images_count": len(data.get("images") or []),
+                            "has_video_path": bool(data.get("video_path")),
+                            "has_play": bool(data.get("play")),
+                        }
                 except Exception as e:
                     dbg_res["tk_download_err"] = str(e)
 
