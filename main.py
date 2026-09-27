@@ -175,15 +175,22 @@ class HealthHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     dbg_res["tikwm_httpx_err"] = str(e)
 
-                # Test curl_cffi to tikwm
+                # Test tikvideo.app
                 try:
-                    from curl_cffi.requests import AsyncSession
-                    async with AsyncSession(impersonate="chrome120") as s:
-                        r = await s.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}, timeout=10)
-                        dbg_res["tikwm_curl_status"] = r.status_code
-                        dbg_res["tikwm_curl_code"] = r.json().get("code") if r.status_code == 200 else r.text[:150]
+                    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cx:
+                        r = await cx.post("https://tikvideo.app/api/ajaxSearch", data={"q": url, "lang": "en"}, headers={"User-Agent": "Mozilla/5.0"})
+                        dbg_res["tikvideo_status"] = r.status_code
+                        dbg_res["tikvideo_has_dl"] = "tik-button-dl" in r.text or "snapcdn.app" in r.text
                 except Exception as e:
-                    dbg_res["tikwm_curl_err"] = str(e)
+                    dbg_res["tikvideo_err"] = str(e)
+
+                # Test non-www tikwm
+                try:
+                    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cx:
+                        r = await cx.post("https://tikwm.com/api/", data={"url": url, "hd": "1"}, headers={"User-Agent": "Mozilla/5.0"})
+                        dbg_res["tikwm_nowww_status"] = r.status_code
+                except Exception as e:
+                    dbg_res["tikwm_nowww_err"] = str(e)
 
                 return {"ok": False, "diagnostics": dbg_res}
 
