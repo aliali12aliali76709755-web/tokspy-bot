@@ -155,32 +155,37 @@ class HealthHandler(BaseHTTPRequestHandler):
             
             import asyncio
             import tiktok_service as tk
+            import httpx
             async def run_dbg():
+                dbg_res = {}
                 try:
                     data = await tk.download_video(url)
+                    dbg_res["tk_download"] = bool(data)
                     if data:
-                        vpath = data.get("video_path")
-                        has_vpath = bool(vpath and os.path.exists(vpath))
-                        if vpath and os.path.exists(vpath):
-                            try:
-                                os.remove(vpath)
-                            except Exception:
-                                pass
-                        return {
-                            "ok": True,
-                            "id": data.get("id"),
-                            "title": data.get("title"),
-                            "author": data.get("author"),
-                            "images_count": len(data.get("images", [])),
-                            "first_image": data["images"][0][:80] if data.get("images") else None,
-                            "has_video_file": has_vpath,
-                            "play": data.get("play")[:80] if data.get("play") else None,
-                            "play_count": data.get("play_count"),
-                            "digg_count": data.get("digg_count"),
-                        }
-                    return {"ok": False, "error": "tk.download_video returned None"}
+                        return {"ok": True, "data_keys": list(data.keys()), "id": data.get("id"), "play": bool(data.get("play")), "video_path": bool(data.get("video_path"))}
                 except Exception as e:
-                    return {"ok": False, "error": str(e)}
+                    dbg_res["tk_download_err"] = str(e)
+
+                # Test httpx to tikwm
+                try:
+                    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cx:
+                        r = await cx.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}, headers={"User-Agent": "Mozilla/5.0"})
+                        dbg_res["tikwm_httpx_status"] = r.status_code
+                        dbg_res["tikwm_httpx_code"] = r.json().get("code") if r.status_code == 200 else r.text[:150]
+                except Exception as e:
+                    dbg_res["tikwm_httpx_err"] = str(e)
+
+                # Test curl_cffi to tikwm
+                try:
+                    from curl_cffi.requests import AsyncSession
+                    async with AsyncSession(impersonate="chrome120") as s:
+                        r = await s.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}, timeout=10)
+                        dbg_res["tikwm_curl_status"] = r.status_code
+                        dbg_res["tikwm_curl_code"] = r.json().get("code") if r.status_code == 200 else r.text[:150]
+                except Exception as e:
+                    dbg_res["tikwm_curl_err"] = str(e)
+
+                return {"ok": False, "diagnostics": dbg_res}
 
             res = asyncio.run(run_dbg())
             self.send_response(200)
