@@ -149,19 +149,58 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
             return
 
-        if parsed.path == "/debug_tikwm":
+        if parsed.path == "/debug_services":
             qs = urllib.parse.parse_qs(parsed.query)
-            t_url = qs.get("url", ["https://vm.tiktok.com/ZN86HLRrs/"])[0]
+            t_url = qs.get("url", ["https://www.tiktok.com/@achievrich_/photo/7576393049769528598"])[0]
+            pid = "7576393049769528598"
             import asyncio
+            import httpx
             from curl_cffi.requests import AsyncSession
-            async def run_tikwm():
+            async def run_services():
+                results = {}
+                # 1. Lovetik
                 try:
-                    async with AsyncSession(impersonate="chrome120") as s:
-                        r = await s.post("https://www.tikwm.com/api/", data={"url": t_url, "hd": "1"}, timeout=12)
-                        return {"status": r.status_code, "data": r.json() if r.status_code == 200 else r.text[:200]}
+                    async with httpx.AsyncClient(timeout=6) as cx:
+                        r = await cx.post("https://lovetik.com/api/ajax/search", data={"query": t_url})
+                        results["lovetik"] = {"status": r.status_code, "text": r.text[:200]}
                 except Exception as e:
-                    return {"err": str(e)}
-            res = asyncio.run(run_tikwm())
+                    results["lovetik"] = {"err": str(e)}
+
+                # 2. Countik video variations
+                try:
+                    async with httpx.AsyncClient(timeout=6) as cx:
+                        for ep in [f"https://countik.com/api/video/exist/{pid}", f"https://countik.com/api/video/detail/{pid}", f"https://countik.com/api/video/{pid}"]:
+                            r = await cx.get(ep, headers={"User-Agent": "Mozilla/5.0"})
+                            results[ep] = {"status": r.status_code, "text": r.text[:100]}
+                except Exception as e:
+                    results["countik_err"] = str(e)
+
+                # 3. Tokcounter
+                try:
+                    async with httpx.AsyncClient(timeout=6) as cx:
+                        r = await cx.get(f"https://tokcounter.com/api/video/{pid}", headers={"User-Agent": "Mozilla/5.0"})
+                        results["tokcounter"] = {"status": r.status_code, "text": r.text[:100]}
+                except Exception as e:
+                    results["tokcounter"] = {"err": str(e)}
+
+                # 4. TikWM via free proxy or CORS proxy
+                try:
+                    async with httpx.AsyncClient(timeout=6) as cx:
+                        r = await cx.post("https://api.tikwm.com/api/", data={"url": t_url, "hd": "1"})
+                        results["tikwm_api_subdomain"] = {"status": r.status_code, "text": r.text[:100]}
+                except Exception as e:
+                    results["tikwm_api_subdomain"] = {"err": str(e)}
+
+                # 5. Direct TikTok api-data
+                try:
+                    async with AsyncSession(impersonate="safari15_5") as s:
+                        r = await s.get(t_url, headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X)"}, timeout=6)
+                        results["tiktok_direct_safari"] = {"status": r.status_code, "len": len(r.text), "has_api_data": "api-data" in r.text, "has_sigi": "SIGI_STATE" in r.text}
+                except Exception as e:
+                    results["tiktok_direct_safari"] = {"err": str(e)}
+
+                return results
+            res = asyncio.run(run_services())
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
             self.end_headers()
