@@ -619,11 +619,19 @@ async def download_video(url: str) -> dict | None:
     try:
         from curl_cffi.requests import AsyncSession
         async with AsyncSession(impersonate="chrome120") as s:
-            r = await s.post("https://www.tikwm.com/api/", data={"url": real_url, "hd": "1"}, timeout=12)
+            # Query with original url first (TikWM resolves short links via its own clean proxy network)
+            r = await s.post("https://www.tikwm.com/api/", data={"url": url, "hd": "1"}, timeout=12)
             if r.status_code == 200:
                 j = r.json()
                 if j.get("code") == 0 and j.get("data"):
                     tikwm_meta = j["data"]
+            # Fallback to real_url if different and valid
+            if not tikwm_meta and real_url and real_url != url and ("/video/" in real_url or "/photo/" in real_url):
+                r2 = await s.post("https://www.tikwm.com/api/", data={"url": real_url, "hd": "1"}, timeout=12)
+                if r2.status_code == 200:
+                    j2 = r2.json()
+                    if j2.get("code") == 0 and j2.get("data"):
+                        tikwm_meta = j2["data"]
     except Exception as e:
         log.warning("tikwm api query error: %s", e)
 
