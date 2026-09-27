@@ -149,6 +149,25 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
             return
 
+        if parsed.path == "/debug_tikwm":
+            qs = urllib.parse.parse_qs(parsed.query)
+            t_url = qs.get("url", ["https://vm.tiktok.com/ZN86HLRrs/"])[0]
+            import asyncio
+            from curl_cffi.requests import AsyncSession
+            async def run_tikwm():
+                try:
+                    async with AsyncSession(impersonate="chrome120") as s:
+                        r = await s.post("https://www.tikwm.com/api/", data={"url": t_url, "hd": "1"}, timeout=12)
+                        return {"status": r.status_code, "data": r.json() if r.status_code == 200 else r.text[:200]}
+                except Exception as e:
+                    return {"err": str(e)}
+            res = asyncio.run(run_tikwm())
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            return
+
         if parsed.path == "/debug_profile":
             qs = urllib.parse.parse_qs(parsed.query)
             u = qs.get("u", ["wirtschaftsfakten"])[0]
