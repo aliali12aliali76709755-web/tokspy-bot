@@ -193,9 +193,17 @@ class HealthHandler(BaseHTTPRequestHandler):
 
                 # 5. Direct TikTok api-data
                 try:
+                    import re
                     async with AsyncSession(impersonate="safari15_5") as s:
                         r = await s.get(t_url, headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X)"}, timeout=6)
-                        results["tiktok_direct_safari"] = {"status": r.status_code, "len": len(r.text), "has_api_data": "api-data" in r.text, "has_sigi": "SIGI_STATE" in r.text}
+                        sids = re.findall(r'<script id="([^"]+)"', r.text)
+                        results["tiktok_direct_safari"] = {
+                            "status": r.status_code,
+                            "len": len(r.text),
+                            "script_ids": sids,
+                            "has_universal": "__UNIVERSAL_DATA" in r.text,
+                            "title_tag": re.findall(r'<title>(.*?)</title>', r.text)
+                        }
                 except Exception as e:
                     results["tiktok_direct_safari"] = {"err": str(e)}
 
