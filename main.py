@@ -9,6 +9,8 @@ import urllib.parse
 import json
 import re
 import queue
+import asyncio
+import httpx
 import pymongo
 import certifi
 
@@ -171,9 +173,6 @@ class HealthHandler(BaseHTTPRequestHandler):
         if parsed.path == "/debug_universal":
             qs = urllib.parse.parse_qs(parsed.query)
             t_url = qs.get("url", ["https://www.tiktok.com/@achievrich_/photo/7576393049769528598"])[0]
-            import asyncio
-            import json
-            import re
             from curl_cffi.requests import AsyncSession
             async def run_uni():
                 try:
@@ -215,7 +214,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return {"err": str(e)}
             res = asyncio.run(run_uni())
-            payload = json.dumps(res, ensure_ascii=False).encode('utf-8')
+            payload = json.dumps(res, ensure_ascii=False, default=str).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(payload)))
@@ -226,8 +225,6 @@ class HealthHandler(BaseHTTPRequestHandler):
         if parsed.path == "/debug_profile":
             qs = urllib.parse.parse_qs(parsed.query)
             u = qs.get("u", ["wirtschaftsfakten"])[0]
-            import asyncio
-            import tiktok_service as tk
             async def run_prof():
                 try:
                     p = await tk.fetch_profile(u)
@@ -248,9 +245,6 @@ class HealthHandler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             url = qs.get("url", ["https://vm.tiktok.com/ZN86HLRrs/"])[0]
             
-            import asyncio
-            import tiktok_service as tk
-            import httpx
             async def run_dbg():
                 dbg_res = {}
                 try:
