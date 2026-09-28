@@ -149,66 +149,53 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
             return
 
-        if parsed.path == "/debug_services":
+        if parsed.path == "/debug_universal":
             qs = urllib.parse.parse_qs(parsed.query)
             t_url = qs.get("url", ["https://www.tiktok.com/@achievrich_/photo/7576393049769528598"])[0]
-            pid = "7576393049769528598"
             import asyncio
-            import httpx
+            import json
+            import re
             from curl_cffi.requests import AsyncSession
-            async def run_services():
-                results = {}
-                # 1. Lovetik
+            async def run_uni():
                 try:
-                    async with httpx.AsyncClient(timeout=6) as cx:
-                        r = await cx.post("https://lovetik.com/api/ajax/search", data={"query": t_url})
-                        results["lovetik"] = {"status": r.status_code, "text": r.text[:200]}
-                except Exception as e:
-                    results["lovetik"] = {"err": str(e)}
-
-                # 2. Countik video variations
-                try:
-                    async with httpx.AsyncClient(timeout=6) as cx:
-                        for ep in [f"https://countik.com/api/video/exist/{pid}", f"https://countik.com/api/video/detail/{pid}", f"https://countik.com/api/video/{pid}"]:
-                            r = await cx.get(ep, headers={"User-Agent": "Mozilla/5.0"})
-                            results[ep] = {"status": r.status_code, "text": r.text[:100]}
-                except Exception as e:
-                    results["countik_err"] = str(e)
-
-                # 3. Tokcounter
-                try:
-                    async with httpx.AsyncClient(timeout=6) as cx:
-                        r = await cx.get(f"https://tokcounter.com/api/video/{pid}", headers={"User-Agent": "Mozilla/5.0"})
-                        results["tokcounter"] = {"status": r.status_code, "text": r.text[:100]}
-                except Exception as e:
-                    results["tokcounter"] = {"err": str(e)}
-
-                # 4. TikWM via free proxy or CORS proxy
-                try:
-                    async with httpx.AsyncClient(timeout=6) as cx:
-                        r = await cx.post("https://api.tikwm.com/api/", data={"url": t_url, "hd": "1"})
-                        results["tikwm_api_subdomain"] = {"status": r.status_code, "text": r.text[:100]}
-                except Exception as e:
-                    results["tikwm_api_subdomain"] = {"err": str(e)}
-
-                # 5. Direct TikTok api-data
-                try:
-                    import re
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    }
                     async with AsyncSession(impersonate="safari15_5") as s:
-                        r = await s.get(t_url, headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X)"}, timeout=6)
-                        sids = re.findall(r'<script id="([^"]+)"', r.text)
-                        results["tiktok_direct_safari"] = {
-                            "status": r.status_code,
-                            "len": len(r.text),
-                            "script_ids": sids,
-                            "has_universal": "__UNIVERSAL_DATA" in r.text,
-                            "title_tag": re.findall(r'<title>(.*?)</title>', r.text)
+                        r = await s.get(t_url, headers=headers, timeout=10)
+                        m = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', r.text, re.S)
+                        if not m:
+                            return {"found": False, "len": len(r.text)}
+                        raw = json.loads(m.group(1))
+                        scope = raw.get("__DEFAULT_SCOPE__", {})
+                        # find all video-detail or post objects in scope
+                        v_detail = scope.get("webapp.video-detail") or scope.get("webapp.user-detail") or {}
+                        item_info = v_detail.get("itemInfo", {})
+                        item_struct = item_info.get("itemStruct", {})
+                        # recursively search for playCount or diggCount
+                        def find_counts(d, depth=0):
+                            res = {}
+                            if depth > 5 or not isinstance(d, dict):
+                                return res
+                            for k, v in d.items():
+                                if k in ("playCount", "diggCount", "commentCount", "shareCount", "collectCount", "stats", "statsV2"):
+                                    res[k] = v
+                                elif isinstance(v, dict):
+                                    sub = find_counts(v, depth+1)
+                                    if sub:
+                                        res[k] = sub
+                            return res
+                        return {
+                            "found": True,
+                            "scope_keys": list(scope.keys()),
+                            "stats": item_struct.get("stats"),
+                            "recursive_counts": find_counts(scope)
                         }
                 except Exception as e:
-                    results["tiktok_direct_safari"] = {"err": str(e)}
-
-                return results
-            res = asyncio.run(run_services())
+                    return {"err": str(e)}
+            res = asyncio.run(run_uni())
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
             self.end_headers()
