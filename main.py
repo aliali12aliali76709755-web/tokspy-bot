@@ -115,6 +115,21 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        try:
+            self._handle_get()
+        except Exception as e:
+            root_logger.exception("HealthHandler do_GET error: %s", e)
+            try:
+                err_payload = json.dumps({"ok": False, "error": str(e)}, default=str).encode("utf-8")
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(err_payload)))
+                self.end_headers()
+                self.wfile.write(err_payload)
+            except Exception:
+                pass
+
+    def _handle_get(self):
         parsed = urllib.parse.urlparse(self.path)
 
         if parsed.path == "/click":
@@ -145,7 +160,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 res = {"ok": True, "stats": doc}
             except Exception as e:
                 res = {"ok": False, "error": str(e)}
-            payload = json.dumps(res, ensure_ascii=False).encode('utf-8')
+            payload = json.dumps(res, ensure_ascii=False, default=str).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(payload)))
@@ -322,7 +337,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        pass
+        root_logger.info("HTTP %s - " + format, self.address_string(), *args)
 
 def run_http_server():
     port = int(os.environ.get("PORT", "10000"))
