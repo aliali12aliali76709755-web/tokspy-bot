@@ -1714,42 +1714,84 @@ def admin_kb() -> InlineKeyboardMarkup:
 
 
 async def _stats_counts():
-    total = await db.users.count_documents({})
-    vips = await db.users.count_documents({"is_vip": True})
-    mons = await db.monitors.count_documents({})
-    n = now()
-    since = {
-        "اليوم": n - timedelta(days=1),
-        "الأسبوع": n - timedelta(days=7),
-        "الشهر": n - timedelta(days=30),
-        "السنة": n - timedelta(days=365),
+    tz = timezone(timedelta(hours=3))  # UTC+3 local time (Baghdad / Riyadh)
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(tz)
+
+    today_00_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_00_utc = today_00_local.astimezone(timezone.utc)
+
+    yesterday_00_local = today_00_local - timedelta(days=1)
+    yesterday_00_utc = yesterday_00_local.astimezone(timezone.utc)
+    yesterday_end_utc = today_00_utc
+
+    last_24h_utc = now_utc - timedelta(hours=24)
+    last_7d_utc = now_utc - timedelta(days=7)
+    month_00_local = today_00_local.replace(day=1)
+    month_00_utc = month_00_local.astimezone(timezone.utc)
+
+    total_users = await db.users.count_documents({})
+    users_today = await db.users.count_documents({"joined_at": {"$gte": today_00_utc.isoformat()}})
+    users_yesterday = await db.users.count_documents({
+        "joined_at": {"$gte": yesterday_00_utc.isoformat(), "$lt": yesterday_end_utc.isoformat()}
+    })
+    users_24h = await db.users.count_documents({"joined_at": {"$gte": last_24h_utc.isoformat()}})
+    users_7d = await db.users.count_documents({"joined_at": {"$gte": last_7d_utc.isoformat()}})
+    users_month = await db.users.count_documents({"joined_at": {"$gte": month_00_utc.isoformat()}})
+
+    # Snapshots / Account Scans
+    total_snaps = await db.snapshots.count_documents({})
+    snaps_today = await db.snapshots.count_documents({"ts": {"$gte": today_00_utc.isoformat()}})
+    snaps_yesterday = await db.snapshots.count_documents({
+        "ts": {"$gte": yesterday_00_utc.isoformat(), "$lt": yesterday_end_utc.isoformat()}
+    })
+    snaps_24h = await db.snapshots.count_documents({"ts": {"$gte": last_24h_utc.isoformat()}})
+
+    # Monitors
+    total_monitors = await db.monitors.count_documents({})
+
+    return {
+        "total_users": total_users,
+        "users_today": users_today,
+        "users_yesterday": users_yesterday,
+        "users_24h": users_24h,
+        "users_7d": users_7d,
+        "users_month": users_month,
+        "total_snaps": total_snaps,
+        "snaps_today": snaps_today,
+        "snaps_yesterday": snaps_yesterday,
+        "snaps_24h": snaps_24h,
+        "total_monitors": total_monitors,
     }
-    period = {}
-    for k, t in since.items():
-        period[k] = await db.users.count_documents({"joined_at": {"$gte": t.isoformat()}})
-    pays = await db.payments.find({}).to_list(100000)
-    stars = sum(p.get("stars", 0) for p in pays)
-    return total, vips, mons, period, stars, len(pays)
 
 
 async def admin_stats_text() -> str:
-    total, vips, mons, period, stars, npay = await _stats_counts()
+    s = await _stats_counts()
     web_doc = await db.web_stats.find_one({"_id": "global"}) or {}
     web_visits = web_doc.get("total_visits", 0)
     web_clicks = web_doc.get("bot_clicks", 0)
     web_convs = web_doc.get("conversions", 0)
+    conv_rate = (web_convs / web_visits * 100) if web_visits > 0 else 0
+
     return (
-        "🛠 <b>لوحة التحكم — الإحصائيات</b>\n"
+        "🛠 <b>لوحة التحكم — الإحصائيات الشاملة</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"👥 إجمالي المستخدمين: <b>{total}</b> (البوت مجاني بالكامل 🎉)\n"
-        f"🆕 اليوم: {period['اليوم']} | الأسبوع: {period['الأسبوع']}\n"
-        f"🗓 الشهر: {period['الشهر']} | السنة: {period['السنة']}\n\n"
+        f"👥 <b>إجمالي المستخدمين:</b> <code>{s['total_users']:,}</code> مستخدم\n\n"
+        f"📈 <b>حركة المشتركين الجدد:</b>\n"
+        f"• 📅 <b>اليوم (منذ 12:00 ص):</b> <code>{s['users_today']:,}</code> مستخدم جديد\n"
+        f"• 📆 <b>أمس:</b> <code>{s['users_yesterday']:,}</code> مستخدم\n"
+        f"• ⏳ <b>آخر 24 ساعة:</b> <code>{s['users_24h']:,}</code> مستخدم\n"
+        f"• 🗓 <b>آخر 7 أيام:</b> <code>{s['users_7d']:,}</code> مستخدم\n"
+        f"• 📊 <b>هذا الشهر:</b> <code>{s['users_month']:,}</code> مستخدم\n\n"
+        f"⚡ <b>نشاط البوت وعمليات الفحص:</b>\n"
+        f"• 🔍 <b>إجمالي عمليات الفحص:</b> <code>{s['total_snaps']:,}</code> فحص\n"
+        f"• 🔎 <b>فحوصات اليوم:</b> <code>{s['snaps_today']:,}</code> فحص (أمس: <code>{s['snaps_yesterday']:,}</code>)\n"
+        f"• 🔔 <b>حسابات تحت المراقبة (24/7):</b> <code>{s['total_monitors']}</code> حساب\n\n"
         f"🌐 <b>إحصائيات رابط الموقع (Landing Page):</b>\n"
-        f"• الزيارات الإجمالية: <b>{web_visits}</b> زائر\n"
-        f"• نقرات زر التحويل: <b>{web_clicks}</b>\n"
-        f"• المستخدمين الفعليين (بدء البوت): <b>{web_convs}</b>\n"
-        f"🔗 الرابط: <code>https://tokspy-telegram-bot.onrender.com</code>\n\n"
-        f"🔔 حسابات تحت المراقبة: {mons}"
+        f"• 👁 <b>الزيارات الإجمالية:</b> <code>{web_visits:,}</code> زائر\n"
+        f"• 🖱 <b>التحويلات إلى البوت:</b> <code>{web_clicks:,}</code> نقرة\n"
+        f"• 🎯 <b>المستخدمين الفعليين (بدء البوت):</b> <code>{web_convs:,}</code> (معدل التحويل: <code>{conv_rate:.1f}%</code>)\n"
+        f"🔗 <code>https://tokspy-telegram-bot.onrender.com</code>"
     )
 
 

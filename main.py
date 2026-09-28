@@ -47,7 +47,7 @@ VISIT_QUEUE = queue.Queue()
 def visitor_flush_worker():
     """Worker thread that flushes visitor analytics to MongoDB periodically without blocking HTTP requests."""
     mongo_url = os.environ.get("MONGO_URL")
-    db_name = os.environ.get("DB_NAME", "tiktokbot")
+    db_name = os.environ.get("DB_NAME", "tokspy_db")
     if not mongo_url:
         return
     
@@ -154,7 +154,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
         if parsed.path in ("/api/stats", "/stats"):
             mongo_url = os.environ.get("MONGO_URL")
-            db_name = os.environ.get("DB_NAME", "tiktokbot")
+            db_name = os.environ.get("DB_NAME", "tokspy_db")
             try:
                 client = pymongo.MongoClient(mongo_url, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=2000)
                 doc = client[db_name]["web_stats"].find_one({"_id": "global"}) or {}
@@ -310,9 +310,14 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
-        # Track visitor unless internal monitor/keepalive
+        if parsed.path in ("/favicon.ico", "/robots.txt", "/apple-touch-icon.png", "/healthz"):
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        # Track visitor unless internal monitor/keepalive/crawler
         ua = self.headers.get("User-Agent", "")
-        if "TokSpyKeepAlive" not in ua and "Render" not in ua:
+        if "TokSpyKeepAlive" not in ua and "Render" not in ua and "bot" not in ua.lower() and "crawler" not in ua.lower():
             qs = urllib.parse.parse_qs(parsed.query)
             ref = qs.get("ref", ["direct"])[0]
             VISIT_QUEUE.put({"ref": ref, "click": False})

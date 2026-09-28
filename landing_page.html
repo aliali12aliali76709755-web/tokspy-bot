@@ -223,7 +223,10 @@
         const btn = document.getElementById('btnLaunch');
         btn.href = tgWebUrl;
 
+        let clickRecorded = false;
         function recordClick() {
+            if (clickRecorded) return;
+            clickRecorded = true;
             try {
                 if (navigator.sendBeacon) {
                     navigator.sendBeacon('/click?ref=' + encodeURIComponent(ref));
