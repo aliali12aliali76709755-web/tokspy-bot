@@ -127,6 +127,20 @@ async def _handle_referral(tid: int, arg: str, bot_instance):
     except Exception:
         pass
 
+
+async def _touch_user_activity(tid: int):
+    try:
+        await db.users.update_one(
+            {"telegram_id": tid},
+            {
+                "$set": {"last_active": now().isoformat()},
+                "$inc": {"actions_count": 1}
+            },
+            upsert=True
+        )
+    except Exception:
+        pass
+
 # ------------------------- reply keyboard -------------------------
 BTN_SEARCH = "🔍 بحث عن حساب"
 BTN_MON = "🔔 مراقبتي"
@@ -468,6 +482,7 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, usern
 
 async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     tid = update.effective_user.id
+    asyncio.create_task(_touch_user_activity(tid))
     wait = await update.effective_message.reply_text("⏳ جاري تحميل الفيديو بدون علامة مائية...")
     data = await tk.download_video(url)
     try:
@@ -622,6 +637,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = (msg.text or msg.caption or "").strip()
     tid = update.effective_user.id
+    asyncio.create_task(_touch_user_activity(tid))
 
     if is_admin(tid):
         ADMIN_SESSIONS.add(tid)
@@ -759,6 +775,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     tid = q.from_user.id
+    asyncio.create_task(_touch_user_activity(tid))
     data = q.data or ""
     action, _, arg = data.partition(":")
 
@@ -1747,11 +1764,24 @@ async def _stats_counts():
     })
     snaps_24h = await db.snapshots.count_documents({"ts": {"$gte": last_24h_utc.isoformat()}})
 
-    # Monitors
+    # Monitors & Active users
     total_monitors = await db.monitors.count_documents({})
+    mon_users = await db.monitors.distinct("telegram_id")
+    mon_users_cnt = len(mon_users)
+
+    searched_users = await db.users.distinct("telegram_id", {
+        "$or": [
+            {"searches": {"$gt": 0}},
+            {"actions_count": {"$gt": 0}},
+            {"last_active": {"$exists": True}}
+        ]
+    })
+    active_users_cnt = len(set(searched_users).union(set(mon_users)))
 
     return {
         "total_users": total_users,
+        "active_users": active_users_cnt,
+        "mon_users_cnt": mon_users_cnt,
         "users_today": users_today,
         "users_yesterday": users_yesterday,
         "users_24h": users_24h,
@@ -1776,7 +1806,8 @@ async def admin_stats_text() -> str:
     return (
         "🛠 <b>لوحة التحكم — الإحصائيات الشاملة</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"👥 <b>إجمالي المستخدمين:</b> <code>{s['total_users']:,}</code> مستخدم\n\n"
+        f"👥 <b>إجمالي المشتركين المسجلين:</b> <code>{s['total_users']:,}</code> مستخدم\n"
+        f"⚡ <b>المستخدمين المتفاعلين فعلياً:</b> <code>{s['active_users']:,}</code> مستخدم (استخدموا ميزات البوت)\n\n"
         f"📈 <b>حركة المشتركين الجدد:</b>\n"
         f"• 📅 <b>اليوم (منذ 12:00 ص):</b> <code>{s['users_today']:,}</code> مستخدم جديد\n"
         f"• 📆 <b>أمس:</b> <code>{s['users_yesterday']:,}</code> مستخدم\n"
@@ -1786,7 +1817,7 @@ async def admin_stats_text() -> str:
         f"⚡ <b>نشاط البوت وعمليات الفحص:</b>\n"
         f"• 🔍 <b>إجمالي عمليات الفحص:</b> <code>{s['total_snaps']:,}</code> فحص\n"
         f"• 🔎 <b>فحوصات اليوم:</b> <code>{s['snaps_today']:,}</code> فحص (أمس: <code>{s['snaps_yesterday']:,}</code>)\n"
-        f"• 🔔 <b>حسابات تحت المراقبة (24/7):</b> <code>{s['total_monitors']}</code> حساب\n\n"
+        f"• 🔔 <b>حسابات تحت المراقبة (24/7):</b> <code>{s['total_monitors']}</code> حساب (لـ <code>{s['mon_users_cnt']}</code> مستخدم)\n\n"
         f"🌐 <b>إحصائيات رابط الموقع (Landing Page):</b>\n"
         f"• 👁 <b>الزيارات الإجمالية:</b> <code>{web_visits:,}</code> زائر\n"
         f"• 🖱 <b>التحويلات إلى البوت:</b> <code>{web_clicks:,}</code> نقرة\n"
