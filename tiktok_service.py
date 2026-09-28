@@ -539,6 +539,42 @@ async def _scrape_musicaldown(url: str) -> dict | None:
     return None
 
 
+def extract_item_struct_from_html(html: str) -> dict | None:
+    """Extract itemStruct post details from TikTok UNIVERSAL_DATA or api-data script tags."""
+    if not html:
+        return None
+    # 1. Try __UNIVERSAL_DATA_FOR_REHYDRATION__
+    m_uni = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', html, re.S)
+    if m_uni:
+        try:
+            raw_uni = json.loads(m_uni.group(1))
+            scope = raw_uni.get("__DEFAULT_SCOPE__", {})
+            for key in ("webapp.reflow.video.detail", "webapp.video-detail"):
+                it = scope.get(key, {}).get("itemInfo", {}).get("itemStruct")
+                if it:
+                    return it
+            for k, val in scope.items():
+                if isinstance(val, dict):
+                    it = val.get("itemInfo", {}).get("itemStruct")
+                    if it:
+                        return it
+        except Exception:
+            pass
+
+    # 2. Try api-data
+    m_api = re.search(r'<script id="api-data"[^>]*>(.*?)</script>', html, re.S)
+    if m_api:
+        try:
+            raw_api = json.loads(m_api.group(1))
+            it = raw_api.get("videoDetail", {}).get("itemInfo", {}).get("itemStruct")
+            if it:
+                return it
+        except Exception:
+            pass
+
+    return None
+
+
 async def download_video(url: str) -> dict | None:
     """Download TikTok post (video or photo slideshow) with reliable multi-engine fallback.
     Returns normalized dictionary with metadata, play/images/video_path.
@@ -581,17 +617,14 @@ async def download_video(url: str) -> dict | None:
             if m_u:
                 author_uid = m_u.group(1)
 
-            # Check if page has api-data JSON
+            # Check if page has api-data JSON or UNIVERSAL_DATA
             if "?" in r.url or real_url != url:
                 r2 = await s.get(real_url, headers=mobile_headers, timeout=10)
                 html = r2.text
             else:
                 html = r.text
 
-            m = re.search(r'<script id="api-data"[^>]*>(.*?)</script>', html, re.S)
-            if m:
-                raw_json = json.loads(m.group(1))
-                item_struct = raw_json.get("videoDetail", {}).get("itemInfo", {}).get("itemStruct")
+            item_struct = extract_item_struct_from_html(html)
     except Exception as e:
         log.warning("Direct scrape error for %s: %s", url, e)
 
@@ -635,16 +668,16 @@ async def download_video(url: str) -> dict | None:
     except Exception as e:
         log.warning("tikwm api query error: %s", e)
 
-    meta_id = (tikwm_meta.get("id") if tikwm_meta else None) or post_id or ""
+    meta_id = (tikwm_meta.get("id") if tikwm_meta else None) or (item_struct.get("id") if item_struct else None) or post_id or ""
     if not snowflake_ts and meta_id:
         snowflake_ts = extract_snowflake_timestamp(meta_id)
 
-    meta_views = _to_int(tikwm_meta.get("play_count")) if tikwm_meta else (item_struct.get("stats", {}).get("playCount", 0) if item_struct else 0)
-    meta_likes = _to_int(tikwm_meta.get("digg_count")) if tikwm_meta else (item_struct.get("stats", {}).get("diggCount", 0) if item_struct else 0)
-    meta_comments = _to_int(tikwm_meta.get("comment_count")) if tikwm_meta else (item_struct.get("stats", {}).get("commentCount", 0) if item_struct else 0)
-    meta_shares = _to_int(tikwm_meta.get("share_count")) if tikwm_meta else (item_struct.get("stats", {}).get("shareCount", 0) if item_struct else 0)
-    meta_saves = _to_int(tikwm_meta.get("collect_count")) if tikwm_meta else (item_struct.get("stats", {}).get("collectCount", 0) if item_struct else 0)
-    meta_downloads = _to_int(tikwm_meta.get("download_count")) if tikwm_meta else 0
+    meta_views = (_to_int(tikwm_meta.get("play_count")) if tikwm_meta else 0) or (_to_int(item_struct.get("stats", {}).get("playCount", 0)) if item_struct else 0)
+    meta_likes = (_to_int(tikwm_meta.get("digg_count")) if tikwm_meta else 0) or (_to_int(item_struct.get("stats", {}).get("diggCount", 0)) if item_struct else 0)
+    meta_comments = (_to_int(tikwm_meta.get("comment_count")) if tikwm_meta else 0) or (_to_int(item_struct.get("stats", {}).get("commentCount", 0)) if item_struct else 0)
+    meta_shares = (_to_int(tikwm_meta.get("share_count")) if tikwm_meta else 0) or (_to_int(item_struct.get("stats", {}).get("shareCount", 0)) if item_struct else 0)
+    meta_saves = (_to_int(tikwm_meta.get("collect_count")) if tikwm_meta else 0) or (_to_int(item_struct.get("stats", {}).get("collectCount", 0)) if item_struct else 0)
+    meta_downloads = (_to_int(tikwm_meta.get("download_count")) if tikwm_meta else 0)
     meta_create_time = (_to_int(tikwm_meta.get("create_time")) if tikwm_meta else None) or (_to_int(item_struct.get("createTime")) if item_struct else None) or snowflake_ts
 
     author_info = (tikwm_meta.get("author") if tikwm_meta else None) or (item_struct.get("author") if item_struct else None) or {}
