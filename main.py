@@ -126,11 +126,13 @@ class HealthHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/logs":
+            logs_text = "\n".join(LOG_BUFFER)
+            payload = logs_text.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
-            logs_text = "\n".join(LOG_BUFFER)
-            self.wfile.write(logs_text.encode('utf-8'))
+            self.wfile.write(payload)
             return
 
         if parsed.path in ("/api/stats", "/stats"):
@@ -143,10 +145,12 @@ class HealthHandler(BaseHTTPRequestHandler):
                 res = {"ok": True, "stats": doc}
             except Exception as e:
                 res = {"ok": False, "error": str(e)}
+            payload = json.dumps(res, ensure_ascii=False).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
-            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(payload)
             return
 
         if parsed.path == "/debug_universal":
@@ -196,10 +200,12 @@ class HealthHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return {"err": str(e)}
             res = asyncio.run(run_uni())
+            payload = json.dumps(res, ensure_ascii=False).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
-            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(payload)
             return
 
         if parsed.path == "/debug_profile":
@@ -212,12 +218,15 @@ class HealthHandler(BaseHTTPRequestHandler):
                     p = await tk.fetch_profile(u)
                     return {"ok": bool(p), "profile": p}
                 except Exception as e:
-                    return {"ok": False, "error": str(e)}
+                    import traceback
+                    return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
             res = asyncio.run(run_prof())
+            payload = json.dumps(res, ensure_ascii=True, default=str).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
-            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(payload)
             return
 
         if parsed.path == "/debug_dl":
