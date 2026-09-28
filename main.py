@@ -4,7 +4,7 @@ import time
 import urllib.request
 import logging
 from collections import deque
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 import urllib.parse
 import json
 import re

@@ -72,10 +72,11 @@ async def fetch_profile(username: str) -> dict | None:
 
     # 1) Countik public API (fast, reliable on datacenter IPs without blocking)
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as cx:
-            rc = await cx.get(
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession(impersonate="chrome120") as s:
+            rc = await s.get(
                 f"https://countik.com/api/exist/{username}",
-                headers={"User-Agent": _UA},
+                timeout=10,
             )
             if rc.status_code == 200:
                 cj = rc.json()
