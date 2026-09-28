@@ -278,11 +278,18 @@ class HealthHandler(BaseHTTPRequestHandler):
 
                 return {"ok": False, "diagnostics": dbg_res}
 
-            res = asyncio.run(run_dbg())
+            try:
+                res = asyncio.run(run_dbg())
+                payload = json.dumps(res, ensure_ascii=True, default=str).encode('utf-8')
+            except Exception as e:
+                import traceback
+                payload = json.dumps({"ok": False, "err": str(e), "trace": traceback.format_exc()}).encode('utf-8')
+
             self.send_response(200)
             self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
-            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(payload)
             return
 
         # Track visitor unless internal monitor/keepalive
