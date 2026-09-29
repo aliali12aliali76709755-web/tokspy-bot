@@ -876,7 +876,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "checksub":
-        if await ensure_subscribed(update, context):
+        if await ensure_subscribed(update, context, is_checksub=True):
+            try:
+                await q.answer("✅ تم التحقق بنجاح!")
+            except Exception:
+                pass
             try:
                 await q.message.delete()
             except Exception:
@@ -892,6 +896,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await context.bot.send_message(
                 chat_id=tid, text=txt, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB
             )
+        else:
+            try:
+                await q.answer("⚠️ لم تشترك في جميع القنوات أو البوتات المطلوبة بعد!", show_alert=True)
+            except Exception:
+                pass
         return
 
     if action == "adm":
@@ -929,6 +938,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ch = arg.split("rmch:", 1)[1]
             s = await get_settings()
             chans = [c for c in (s.get("forced_channels") or []) if c != ch]
+            global _settings_cache_time
+            _settings_cache_time = 0
             await db.settings.update_one({"_id": "settings"}, {"$set": {"forced_channels": chans}}, upsert=True)
             return await q.message.reply_text(f"🗑 حُذفت {ch}.", reply_markup=admin_kb())
         return
@@ -1688,7 +1699,12 @@ async def get_settings() -> dict:
     return _settings_cache
 
 
-async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+def is_bot_target(ch: str) -> bool:
+    clean = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
+    return clean.endswith("bot")
+
+
+async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, is_checksub: bool = False) -> bool:
     tid = update.effective_user.id
     if is_admin(tid):
         return True
@@ -1696,25 +1712,75 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     chans = s.get("forced_channels") or []
     if not chans:
         return True
+
+    # Retrieve or initialize verified bots for this user
+    verified_bots = context.user_data.get("verified_bots") if (context and context.user_data is not None) else None
+    if verified_bots is None:
+        try:
+            u = await db.users.find_one({"telegram_id": tid}, {"verified_bots": 1})
+            verified_bots = set(u.get("verified_bots", [])) if u else set()
+        except Exception:
+            verified_bots = set()
+        if context and context.user_data is not None:
+            context.user_data["verified_bots"] = verified_bots
+
+    # If user pressed "تحقّقت" (checksub callback), mark all required bots as verified
+    if is_checksub:
+        for ch in chans:
+            if is_bot_target(ch):
+                clean_bot = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
+                verified_bots.add(clean_bot)
+                try:
+                    asyncio.create_task(
+                        db.users.update_one(
+                            {"telegram_id": tid},
+                            {"$addToSet": {"verified_bots": clean_bot}},
+                            upsert=True
+                        )
+                    )
+                except Exception:
+                    pass
+
     missing = []
     for ch in chans:
-        try:
-            mem = await context.bot.get_chat_member(ch, tid)
-            if mem.status in ("left", "kicked"):
-                missing.append(ch)
-        except Exception:
-            missing.append(ch)
+        clean_ch = ch.strip().rstrip("/").split("/")[-1].lstrip("@")
+        if is_bot_target(ch):
+            if clean_ch.lower() not in verified_bots:
+                missing.append((ch, True))
+        else:
+            try:
+                mem = await context.bot.get_chat_member(ch, tid)
+                if mem.status in ("left", "kicked"):
+                    missing.append((ch, False))
+            except Exception:
+                missing.append((ch, False))
+
     if not missing:
         return True
-    kb = [[InlineKeyboardButton(f"📢 اشترك: {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in missing]
+
+    kb = []
+    for ch, is_bot in missing:
+        clean = ch.strip().rstrip("/").split("/")[-1].lstrip("@")
+        if is_bot:
+            kb.append([InlineKeyboardButton(f"🤖 دخول البوت: @{clean}", url=f"https://t.me/{clean}?start=tokspy")])
+        else:
+            kb.append([InlineKeyboardButton(f"📢 اشترك بالقناة: @{clean}", url=f"https://t.me/{clean}")])
+
     kb.append([InlineKeyboardButton("✅ تحقّقت — تابع", callback_data="checksub")])
-    msg = update.effective_message
-    if msg:
+    prompt_txt = (
+        "<tg-emoji emoji-id=\"6163729951859148826\">🎫</tg-emoji> <b>الاشتراك إجباري</b>\n"
+        "يرجى إتمام الخطوات التالية ثم الضغط على «✅ تحقّقت — تابع»:"
+    )
+    markup = InlineKeyboardMarkup(kb)
+
+    if update.callback_query and update.callback_query.message:
         try:
-            await msg.reply_text(
-                "<tg-emoji emoji-id=\"6163729951859148826\">🎫</tg-emoji> <b>الاشتراك إجباري</b>\nاشترك في القنوات التالية ثم اضغط «تحقّقت»:",
-                parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb),
-            )
+            await update.callback_query.message.edit_text(prompt_txt, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Exception:
+            pass
+    elif update.effective_message:
+        try:
+            await update.effective_message.reply_text(prompt_txt, parse_mode=ParseMode.HTML, reply_markup=markup)
         except Exception:
             pass
     return False
@@ -1964,9 +2030,22 @@ async def _add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, ch: s
     chans = s.get("forced_channels") or []
     if ch not in chans:
         chans.append(ch)
+    global _settings_cache_time
+    _settings_cache_time = 0
     await db.settings.update_one({"_id": "settings"}, {"$set": {"forced_channels": chans}}, upsert=True)
+    clean = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
+    if clean.endswith("bot"):
+        msg = (
+            f"✅ أُضيف البوت <b>{ch}</b> إلى الاشتراك الإجباري بنجاح!\n"
+            f"ℹ️ سيطلب البوت من المستخدمين الدخول للبوت والضغط على ابدأ، ثم العودة وتأكيد التحقق."
+        )
+    else:
+        msg = (
+            f"✅ أُضيفت القناة <b>{ch}</b> إلى الاشتراك الإجباري.\n"
+            f"⚠️ تأكّد أن البوت <b>أدمن</b> في القناة ليتمكن من التحقق التلقائي من اشتراك المستخدمين."
+        )
     await update.effective_message.reply_text(
-        f"✅ أُضيفت القناة {ch}.\n⚠️ تأكّد أن البوت <b>أدمن</b> في القناة ليتحقق من الاشتراك.",
+        msg,
         parse_mode=ParseMode.HTML, reply_markup=admin_kb(),
     )
 
