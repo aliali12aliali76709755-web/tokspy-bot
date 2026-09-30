@@ -351,7 +351,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if args and args[0].startswith("ref_"):
             asyncio.create_task(_handle_referral(tid, args[0], context.bot))
 
-    if not await ensure_subscribed(update, context):
+    if not await ensure_subscribed(update, context, is_start=True):
         return
 
     user_lang = await get_effective_lang(context, user)
@@ -391,6 +391,22 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_lang = i18n.detect_lang(getattr(req.from_user, "language_code", None))
         start_text = i18n.get_start_text(user_lang)
         main_kb = i18n.get_main_keyboard(user_lang)
+
+        # Auto-verify forced bots so user can use the bot immediately
+        try:
+            s = await get_settings()
+            for ch in (s.get("forced_channels") or []):
+                if is_bot_target(ch):
+                    clean_b = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
+                    asyncio.create_task(
+                        db.users.update_one(
+                            {"telegram_id": tid},
+                            {"$addToSet": {"verified_bots": clean_b}, "$set": {"verified": True}},
+                            upsert=True
+                        )
+                    )
+        except Exception:
+            pass
 
         async def _send_welcome_bg():
             try:
@@ -1704,7 +1720,12 @@ def is_bot_target(ch: str) -> bool:
     return clean.endswith("bot")
 
 
-async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, is_checksub: bool = False) -> bool:
+async def ensure_subscribed(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    is_checksub: bool = False,
+    is_start: bool = False,
+) -> bool:
     tid = update.effective_user.id
     if is_admin(tid):
         return True
@@ -1724,8 +1745,9 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if context and context.user_data is not None:
             context.user_data["verified_bots"] = verified_bots
 
-    # If user pressed "تحقّقت" (checksub callback), mark all required bots as verified
-    if is_checksub:
+    # If user pressed "تحقّقت" (checksub callback) or sent "/start" (is_start=True),
+    # mark all required bots as verified so user is accepted instantly
+    if is_checksub or is_start:
         for ch in chans:
             if is_bot_target(ch):
                 clean_bot = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
@@ -1734,7 +1756,7 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     asyncio.create_task(
                         db.users.update_one(
                             {"telegram_id": tid},
-                            {"$addToSet": {"verified_bots": clean_bot}},
+                            {"$addToSet": {"verified_bots": clean_bot}, "$set": {"verified": True}},
                             upsert=True
                         )
                     )
