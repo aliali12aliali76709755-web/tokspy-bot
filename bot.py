@@ -151,30 +151,15 @@ BTN_AGENCY = "🏢 لوحة الوكالة"
 BTN_NOTICE = "⚠️ تنبيه هام"
 
 MAIN_KB = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("بحث عن حساب", callback_data="main_search", icon_custom_emoji_id="5217871625206132326"),
-        InlineKeyboardButton("تحميل فيديو", callback_data="main_dl", icon_custom_emoji_id="5215714349032678015")
-    ],
-    [
-        InlineKeyboardButton("الحسابات المراقبة", callback_data="main_mon", icon_custom_emoji_id="6037397706505195857"),
-        InlineKeyboardButton("دعوة الأصدقاء", callback_data="main_invite", icon_custom_emoji_id="6048721430730773527")
-    ],
-    [
-        InlineKeyboardButton("تنبيه هام", callback_data="main_notice", icon_custom_emoji_id="6100496806217517918")
-    ]
+    [InlineKeyboardButton("👁 مراقبة حساب تيك توك", callback_data="main_mon")]
 ])
 
 START_TEXT = (
     "🎵 <b>أهلاً بك في بوت معلومات تيك توك</b>\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "أرسل <b>اسم مستخدم</b> أو <b>رابط حساب</b> تيك توك، وأعطيك <tg-emoji emoji-id=\"5014902839575577394\">🆔</tg-emoji> بطاقة معلومات كاملة.\n\n"
-    "<tg-emoji emoji-id=\"5217871625206132326\">🔎</tg-emoji> مثال: <code>@tiktok</code>\n"
-    "<tg-emoji emoji-id=\"5254008401997869778\">🎬</tg-emoji> أرسل رابط فيديو لتحميله بدون علامة مائية.\n\n"
-    "✨ <b>مميزات البوت المجانية بالكامل:</b>\n"
-    "• <tg-emoji emoji-id=\"5179271173568988234\">📈</tg-emoji> تتبّع نمو الحسابات والمتابعين\n"
-    "• 🔔 مراقبة لحظية وتنبيهات التغيير\n"
-    "• ⚖️ مقارنة الحسابات والتقارير وتحميل الصور\n"
-    "• 🎧 الدعم الفني: /support\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "🔍 أرسل <b>اسم مستخدم</b> لمعرفة معلومات الحساب ومشاهدة الستوري.\n"
+    "🎬 أرسل <b>رابط منشور</b> لتحميله بدون علامة مائية.\n\n"
+    "👇 أو اضغط على الزر أدناه لمراقبة حساب تيك توك:\n"
 )
 
 REF_REWARD_DAYS = 3
@@ -681,6 +666,38 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if st == "grant" and is_admin(tid):
         context.user_data.pop("await", None)
         return await _do_grant(update, context, text)
+    if st == "add_monitor":
+        context.user_data.pop("await", None)
+        uid = tk.clean_username(text)
+        if not uid or len(uid) < 2:
+            return await msg.reply_text("❌ يوزر غير صالح. أرسل يوزر أو رابط حساب تيك توك صحيح.")
+        # Enforce max monitors
+        count = await db.monitors.count_documents({"telegram_id": tid})
+        if count >= MAX_MONITORS:
+            return await msg.reply_text(
+                f"⚠️ وصلت للحد الأقصى ({MAX_MONITORS} حسابات مراقبة).\n"
+                "أوقف مراقبة حساب قديم أولاً لإضافة حساب جديد."
+            )
+        exists = await db.monitors.find_one({"telegram_id": tid, "uniqueId": uid})
+        if exists:
+            return await msg.reply_text(f"🔔 @{uid} مراقب بالفعل.")
+        p = await tk.fetch_profile(uid)
+        if not p:
+            return await msg.reply_text("❌ تعذّر جلب الحساب. تأكد من صحة اليوزر.")
+        await db.monitors.insert_one({
+            "telegram_id": tid,
+            "uniqueId": uid,
+            "created_at": now().isoformat(),
+            "last": _track(p),
+        })
+        return await msg.reply_text(
+            f"✅ بدأت مراقبة @{uid} ({count + 1}/{MAX_MONITORS}).\n\n"
+            "سأنبّهك فوراً عند:\n"
+            "• ستوري جديدة أو منشور جديد\n"
+            "• تغيير الاسم أو اليوزر أو البايو أو الصورة\n"
+            "• تغيّر المتابعين أو تحويل الحساب لخاص/عام\n\n"
+            "🔄 (فحص كل ~3 دقائق)"
+        )
 
     # ---- admin entry triggers ----
     if is_admin(tid) and text.lower() in ("صويري", "صوري", "ادمن", "الادمن", "admin", "/admin", "/panel", "لوحة التحكم"):
@@ -772,17 +789,24 @@ async def my_monitors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     mons = await db.monitors.find({"telegram_id": tid}).to_list(100)
     if not mons:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة حساب", callback_data="add_mon_prompt")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة حساب للمراقبة", callback_data="add_mon_prompt")]])
         await update.effective_message.reply_text(
-            "🔔 لا يوجد حسابات مراقبة حالياً.", reply_markup=kb
+            "👁 <b>مراقبة الحسابات</b>\n━━━━━━━━━━\n\n"
+            "لا يوجد حسابات مراقبة حالياً.\n"
+            f"يمكنك مراقبة حتى <b>{MAX_MONITORS}</b> حسابات.\n\n"
+            "اضغط الزر أدناه أو أرسل يوزر الحساب مباشرة:",
+            parse_mode=ParseMode.HTML, reply_markup=kb
         )
         return
+    count = len(mons)
     lines = "\n".join(f"• @{m['uniqueId']}" for m in mons)
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(f"🗑 إيقاف @{m['uniqueId']}", callback_data=f"unmon:{m['uniqueId']}")] for m in mons]
-    )
+    kb_rows = [[InlineKeyboardButton(f"🗑 إيقاف @{m['uniqueId']}", callback_data=f"unmon:{m['uniqueId']}")] for m in mons]
+    if count < MAX_MONITORS:
+        kb_rows.append([InlineKeyboardButton("➕ إضافة حساب للمراقبة", callback_data="add_mon_prompt")])
+    kb = InlineKeyboardMarkup(kb_rows)
     await update.effective_message.reply_text(
-        f"🔔 <b>حساباتك المراقبة</b>\n━━━━━━━━━━\n{lines}", parse_mode=ParseMode.HTML, reply_markup=kb
+        f"👁 <b>حساباتك المراقبة ({count}/{MAX_MONITORS})</b>\n━━━━━━━━━━\n{lines}",
+        parse_mode=ParseMode.HTML, reply_markup=kb
     )
 
 
@@ -836,7 +860,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return await q.message.reply_text(start_txt, reply_markup=kb)
 
     if action == "add_mon_prompt":
-        return await q.message.reply_text("🔍 أرسل اليوزر أو الرابط للحساب ليتم مراقبته:")
+        context.user_data["await"] = "add_monitor"
+        return await q.message.reply_text(
+            "👁 <b>مراقبة حساب تيك توك</b>\n\n"
+            "أرسل يوزر أو رابط الحساب الذي تريد مراقبته.\n"
+            "البوت سيراقب الحساب ويُنبهك فوراً إذا:\n"
+            "• غيّر معلومات الحساب (اسم/صورة/بايو)\n"
+            "• نشر منشور أو ستوري جديدة\n"
+            "• تغيّر عدد المتابعين بشكل ملحوظ",
+            parse_mode=ParseMode.HTML
+        )
     if action == "main_search":
         return await q.message.reply_text(i18n.get_msg(user_lang, "prompt_search"))
     if action == "main_dl":
@@ -902,12 +935,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             txt = (
-                "✅ <b>تم التحقق بنجاح! تم تفعيل ميزات البوت مجاناً.</b>\n\n"
+                "✅ <b>تم التحقق بنجاح!</b>\n\n"
                 "🎵 <b>أهلاً بك في بوت معلومات تيك توك</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "أرسل <b>اسم مستخدم</b> أو <b>رابط حساب</b> تيك توك، وأعطيك <tg-emoji emoji-id=\"5014902839575577394\">🆔</tg-emoji> بطاقة معلومات كاملة.\n\n"
-                "<tg-emoji emoji-id=\"5217871625206132326\">🔎</tg-emoji> مثال: <code>@tiktok</code>\n"
-                "<tg-emoji emoji-id=\"5254008401997869778\">🎬</tg-emoji> أرسل رابط فيديو لتحميله بدون علامة مائية.\n\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                "🔍 أرسل <b>اسم مستخدم</b> لمعرفة معلومات الحساب ومشاهدة الستوري.\n"
+                "🎬 أرسل <b>رابط منشور</b> لتحميله بدون علامة مائية.\n\n"
+                "👇 أو اضغط على الزر أدناه لمراقبة حساب تيك توك:\n"
             )
             return await context.bot.send_message(
                 chat_id=tid, text=txt, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB
@@ -1037,10 +1070,20 @@ async def _vip_gate(q):
     await q.message.reply_text("🔒 هذه الميزة متاحة للجميع مجاناً!")
 
 
+MAX_MONITORS = 3
+
+
 async def add_monitor(q, tid, uid):
     exists = await db.monitors.find_one({"telegram_id": tid, "uniqueId": uid})
     if exists:
         return await q.message.reply_text(f"🔔 @{uid} مراقب بالفعل.")
+    # Enforce max 3 monitored accounts
+    count = await db.monitors.count_documents({"telegram_id": tid})
+    if count >= MAX_MONITORS:
+        return await q.message.reply_text(
+            f"⚠️ وصلت للحد الأقصى ({MAX_MONITORS} حسابات مراقبة).\n"
+            "أوقف مراقبة حساب قديم أولاً لإضافة حساب جديد."
+        )
     p = await tk.fetch_profile(uid)
     if not p:
         return await q.message.reply_text("❌ تعذّر جلب الحساب.")
@@ -1051,9 +1094,12 @@ async def add_monitor(q, tid, uid):
         "last": _track(p),
     })
     await q.message.reply_text(
-        f"🔔 بدأت مراقبة @{uid}.\n"
-        "سأنبّهك فوراً عند: ستوري جديدة، نشر/حذف فيديو، تغيير الاسم/اليوزر/البايو/الصورة، "
-        "تغيّر المتابعين، أو تحويل الحساب لخاص/عام. (فحص كل ~3 دقائق)"
+        f"✅ بدأت مراقبة @{uid} ({count + 1}/{MAX_MONITORS}).\n\n"
+        "سأنبّهك فوراً عند:\n"
+        "• ستوري جديدة أو منشور جديد\n"
+        "• تغيير الاسم أو اليوزر أو البايو أو الصورة\n"
+        "• تغيّر المتابعين أو تحويل الحساب لخاص/عام\n\n"
+        "🔄 (فحص كل ~3 دقائق)"
     )
 
 

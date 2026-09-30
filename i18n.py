@@ -127,14 +127,15 @@ BOT_COMMANDS = {
 # UI Strings
 MESSAGES = {
     "ar": {
-        "start_title": "مرحباً بك في TokSpy ⚡",
+        "start_title": "أهلاً بك في بوت معلومات تيك توك 🎵",
         "start_body": (
-            "أقوى منصة لمراقبة وتحليل حسابات تيك توك وتنزيل الفيديوهات.\n\n"
-            "اختر من القائمة أدناه للبدء:"
+            "🔍 أرسل <b>اسم مستخدم</b> لمعرفة معلومات الحساب ومشاهدة الستوري.\n"
+            "🎬 أرسل <b>رابط منشور</b> لتحميله بدون علامة مائية.\n\n"
+            "👇 أو اضغط على الزر أدناه لمراقبة حساب تيك توك:"
         ),
         "btn_search": "🔍 كشف حساب تيك توك",
         "btn_dl": "📥 تحميل فيديو بدون علامة",
-        "btn_mon": "👁️ المراقبة والتنبيهات",
+        "btn_mon": "👁️ مراقبة حساب تيك توك",
         "btn_invite": "🎁 دعوة الأصدقاء",
         "btn_support": "💬 الدعم الفني",
         "btn_lang": "🌐 اللغة (Language)",
@@ -306,18 +307,7 @@ def get_start_text(lang: str) -> str:
 def get_main_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Builds the main interactive keyboard in the user's language."""
     kb = [
-        [
-            InlineKeyboardButton(get_msg(lang, "btn_search"), callback_data="main_search"),
-            InlineKeyboardButton(get_msg(lang, "btn_dl"), callback_data="main_dl"),
-        ],
-        [
-            InlineKeyboardButton(get_msg(lang, "btn_mon"), callback_data="main_monitors"),
-            InlineKeyboardButton(get_msg(lang, "btn_invite"), callback_data="main_invite"),
-        ],
-        [
-            InlineKeyboardButton(get_msg(lang, "btn_support"), callback_data="main_support"),
-            InlineKeyboardButton(get_msg(lang, "btn_lang"), callback_data="set_lang"),
-        ]
+        [InlineKeyboardButton(get_msg(lang, "btn_mon"), callback_data="main_monitors")],
     ]
     return InlineKeyboardMarkup(kb)
 
