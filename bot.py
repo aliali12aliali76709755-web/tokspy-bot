@@ -684,20 +684,34 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = await tk.fetch_profile(uid)
         if not p:
             return await msg.reply_text("❌ تعذّر جلب الحساب. تأكد من صحة اليوزر.")
+        
+        # Check active stories right away
+        stories = await tk.fetch_stories(uid)
+        known_s = [s["id"] for s in stories] if stories else []
+        
         await db.monitors.insert_one({
             "telegram_id": tid,
             "uniqueId": uid,
             "created_at": now().isoformat(),
             "last": _track(p),
+            "known_stories": known_s,
+            "known_videos": [],
         })
-        return await msg.reply_text(
+        await msg.reply_text(
             f"✅ بدأت مراقبة @{uid} ({count + 1}/{MAX_MONITORS}).\n\n"
             "سأنبّهك فوراً عند:\n"
             "• ستوري جديدة أو منشور جديد\n"
             "• تغيير الاسم أو اليوزر أو البايو أو الصورة\n"
             "• تغيّر المتابعين أو تحويل الحساب لخاص/عام\n\n"
-            "🔄 (فحص كل ~3 دقائق)"
+            "🔄 (فحص سريع كل دقيقة ونصف)"
         )
+        if stories:
+            for s in stories:
+                try:
+                    await _send_media(context, tid, uid, s, "story")
+                except Exception as e:
+                    log.warning("send active story on add error: %s", e)
+        return
 
     # ---- admin entry triggers ----
     if is_admin(tid) and text.lower() in ("صويري", "صوري", "ادمن", "الادمن", "admin", "/admin", "/panel", "لوحة التحكم"):
@@ -1004,7 +1018,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text(f"⚖️ أرسل اسم الحساب الثاني لمقارنته مع @{arg}:")
 
         if action == "monitor":
-            return await add_monitor(q, tid, arg)
+            return await add_monitor(q, tid, arg, context)
 
         if action == "growth":
             return await show_growth(q, arg)
@@ -1073,7 +1087,7 @@ async def _vip_gate(q):
 MAX_MONITORS = 3
 
 
-async def add_monitor(q, tid, uid):
+async def add_monitor(q, tid, uid, context=None):
     exists = await db.monitors.find_one({"telegram_id": tid, "uniqueId": uid})
     if exists:
         return await q.message.reply_text(f"🔔 @{uid} مراقب بالفعل.")
@@ -1087,11 +1101,17 @@ async def add_monitor(q, tid, uid):
     p = await tk.fetch_profile(uid)
     if not p:
         return await q.message.reply_text("❌ تعذّر جلب الحساب.")
+
+    stories = await tk.fetch_stories(uid)
+    known_s = [s["id"] for s in stories] if stories else []
+
     await db.monitors.insert_one({
         "telegram_id": tid,
         "uniqueId": uid,
         "created_at": now().isoformat(),
         "last": _track(p),
+        "known_stories": known_s,
+        "known_videos": [],
     })
     await q.message.reply_text(
         f"✅ بدأت مراقبة @{uid} ({count + 1}/{MAX_MONITORS}).\n\n"
@@ -1099,8 +1119,15 @@ async def add_monitor(q, tid, uid):
         "• ستوري جديدة أو منشور جديد\n"
         "• تغيير الاسم أو اليوزر أو البايو أو الصورة\n"
         "• تغيّر المتابعين أو تحويل الحساب لخاص/عام\n\n"
-        "🔄 (فحص كل ~3 دقائق)"
+        "🔄 (فحص سريع كل دقيقة ونصف)"
     )
+    if stories:
+        bot = getattr(context, "bot", None) or q.get_bot()
+        for s in stories:
+            try:
+                await _send_media(bot, tid, uid, s, "story")
+            except Exception as e:
+                log.warning("send active story on add error: %s", e)
 
 
 def _akey(url):
@@ -1542,6 +1569,7 @@ async def _download_bytes(url, limit=48 * 1024 * 1024):
 
 async def _send_media(context, chat_id, uid, m, kind):
     """Download and send a story/post as actual video/photos (never raw links)."""
+    bot = getattr(context, "bot", context)
     label = {"story": "📸 ستوري جديدة", "high": "⭐ مقطع مميّز"}.get(kind, "🎬 منشور جديد")
     parts = [
         f"🔔 <b>تنبيه مراقبة: {label}</b>",
@@ -1587,10 +1615,10 @@ async def _send_media(context, chat_id, uid, m, kind):
             u = imgs[0]
             b = await _download_bytes(u)
             if b:
-                await context.bot.send_photo(chat_id, photo=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+                await bot.send_photo(chat_id, photo=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
                 return
             try:
-                await context.bot.send_photo(chat_id, photo=u, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+                await bot.send_photo(chat_id, photo=u, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
                 return
             except Exception:
                 pass
@@ -1604,9 +1632,9 @@ async def _send_media(context, chat_id, uid, m, kind):
                 else:
                     media.append(InputMediaPhoto(media=item_media))
             try:
-                await context.bot.send_media_group(chat_id, media=media)
+                await bot.send_media_group(chat_id, media=media)
                 if kb:
-                    await context.bot.send_message(chat_id, "📊 أدوات المنشور:", reply_markup=kb)
+                    await bot.send_message(chat_id, "📊 أدوات المنشور:", reply_markup=kb)
                 return
             except Exception as e:
                 log.warning("send_media_group failed: %s", e)
@@ -1615,13 +1643,13 @@ async def _send_media(context, chat_id, uid, m, kind):
         if play_url and not str(play_url).endswith(".mp3"):
             b = await _download_bytes(play_url)
             if b:
-                await context.bot.send_video(
+                await bot.send_video(
                     chat_id, video=b, caption=cap,
                     parse_mode=ParseMode.HTML, reply_markup=kb,
                 )
                 return
             try:
-                await context.bot.send_video(
+                await bot.send_video(
                     chat_id, video=play_url, caption=cap,
                     parse_mode=ParseMode.HTML, reply_markup=kb,
                 )
@@ -1632,13 +1660,13 @@ async def _send_media(context, chat_id, uid, m, kind):
         if m.get("cover"):
             b = await _download_bytes(m["cover"])
             if b:
-                await context.bot.send_photo(
+                await bot.send_photo(
                     chat_id, photo=b, caption=cap,
                     parse_mode=ParseMode.HTML, reply_markup=kb,
                 )
                 return
             try:
-                await context.bot.send_photo(
+                await bot.send_photo(
                     chat_id, photo=m["cover"], caption=cap,
                     parse_mode=ParseMode.HTML, reply_markup=kb,
                 )
@@ -1646,12 +1674,11 @@ async def _send_media(context, chat_id, uid, m, kind):
             except Exception:
                 pass
 
-        await context.bot.send_message(chat_id, cap, parse_mode=ParseMode.HTML)
+        await bot.send_message(chat_id, cap, parse_mode=ParseMode.HTML)
     except Exception as e:
         log.warning("send media failed: %s", e)
-        log.warning("send media failed: %s", e)
         try:
-            await context.bot.send_message(chat_id, cap + "\n⚠️ تعذّر إرسال الوسائط.", parse_mode=ParseMode.HTML)
+            await bot.send_message(chat_id, cap + "\n⚠️ تعذّر إرسال الوسائط.", parse_mode=ParseMode.HTML)
         except Exception:
             pass
 
@@ -1759,21 +1786,24 @@ async def _process_single_monitor(context: ContextTypes.DEFAULT_TYPE, m: dict):
             new_stories = [s for s in stories if s["id"] not in ks]
             for s in new_stories:
                 await _send_media(context, chat, uid, s, "story")
+        else:
+            for s in stories:
+                await _send_media(context, chat, uid, s, "story")
         update["known_stories"] = list(dict.fromkeys((known_s or []) + [s["id"] for s in stories]))[-60:]
     except Exception as e:
         log.warning("story handling failed: %s", e)
 
-    # --- posts: fetch & send new ones directly ---
-    try:
-        posts = await tk.fetch_posts(uid, 6)
-        known_v = m.get("known_videos")
-        if known_v is not None:
+    # --- posts: fetch & send new ones directly ONLY IF nv > ov ---
+    if nv > ov:
+        try:
+            posts = await tk.fetch_posts(uid, 6)
+            known_v = m.get("known_videos") or []
             kv = set(known_v)
             new_posts = [pp for pp in (posts or []) if pp.get("id") and pp["id"] not in kv]
             if new_posts:
                 for pp in reversed(new_posts):  # oldest first
                     await _send_media(context, chat, uid, pp, "post")
-            elif nv > ov:
+            else:
                 # Video count increased but posts scraper didn't return list immediately
                 await context.bot.send_message(
                     chat,
@@ -1784,10 +1814,12 @@ async def _process_single_monitor(context: ContextTypes.DEFAULT_TYPE, m: dict):
                     f"يمكنك فتح الحساب مباشرة لمشاهدته أو إرسال رابطه لتحميله بدون علامة مائية.",
                     parse_mode=ParseMode.HTML,
                 )
-        if posts:
-            update["known_videos"] = list(dict.fromkeys((known_v or []) + [pp["id"] for pp in posts if pp.get("id")]))[-80:]
-    except Exception as e:
-        log.warning("posts handling failed: %s", e)
+            if posts:
+                update["known_videos"] = list(dict.fromkeys(known_v + [pp["id"] for pp in posts if pp.get("id")]))[-80:]
+        except Exception as e:
+            log.warning("posts handling failed: %s", e)
+    elif m.get("known_videos") is None:
+        update["known_videos"] = []
 
     await db.monitors.update_one({"_id": m["_id"]}, {"$set": update})
 
@@ -1796,12 +1828,12 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     mons = await db.monitors.find({}).to_list(10000)
     if not mons:
         return
-    sem = asyncio.Semaphore(15)  # Limit concurrency to 15 parallel requests
+    sem = asyncio.Semaphore(20)  # Concurrency limit
     
     async def worker(m):
         async with sem:
             try:
-                await asyncio.wait_for(_process_single_monitor(context, m), timeout=30.0)
+                await asyncio.wait_for(_process_single_monitor(context, m), timeout=45.0)
             except Exception as e:
                 log.warning("monitor job worker error: %s", e)
                 
