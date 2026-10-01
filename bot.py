@@ -336,7 +336,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if args and args[0].startswith("ref_"):
             asyncio.create_task(_handle_referral(tid, args[0], context.bot))
 
-    if not await ensure_subscribed(update, context, is_start=True):
+    if not await ensure_subscribed(update, context):
         return
 
     user_lang = await get_effective_lang(context, user)
@@ -1770,7 +1770,6 @@ async def ensure_subscribed(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     is_checksub: bool = False,
-    is_start: bool = False,
 ) -> bool:
     tid = update.effective_user.id
     if is_admin(tid):
@@ -1791,9 +1790,8 @@ async def ensure_subscribed(
         if context and context.user_data is not None:
             context.user_data["verified_bots"] = verified_bots
 
-    # If user pressed "تحقّقت" (checksub callback) or sent "/start" (is_start=True),
-    # mark all required bots as verified so user is accepted instantly
-    if is_checksub or is_start:
+    # If user pressed "تحقّقت" (checksub callback), mark all required bots as verified
+    if is_checksub:
         for ch in chans:
             if is_bot_target(ch):
                 clean_bot = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
@@ -1834,10 +1832,12 @@ async def ensure_subscribed(
         else:
             kb.append([InlineKeyboardButton(f"📢 اشترك بالقناة: @{clean}", url=f"https://t.me/{clean}")])
 
-    kb.append([InlineKeyboardButton("✅ تحقّقت — تابع", callback_data="checksub")])
+    kb.append([InlineKeyboardButton("✅ تم الاشتراك — تفعيل البوت", callback_data="checksub")])
     prompt_txt = (
-        "<tg-emoji emoji-id=\"6163729951859148826\">🎫</tg-emoji> <b>الاشتراك إجباري</b>\n"
-        "يرجى إتمام الخطوات التالية ثم الضغط على «✅ تحقّقت — تابع»:"
+        "🔒 <b>تفعيل البوت مطلوب</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "لاستخدام ميزات البوت مجاناً، يرجى أولاً الدخول إلى البوت التالي والضغط على (<b>ابدأ / Start</b>):\n\n"
+        "ثم اضغط على زر <b>«✅ تم الاشتراك — تفعيل البوت»</b> أدناه للمتابعة مباشرة."
     )
     markup = InlineKeyboardMarkup(kb)
 
