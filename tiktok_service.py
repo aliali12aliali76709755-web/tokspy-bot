@@ -284,19 +284,39 @@ async def fetch_stories(username: str) -> list[dict]:
     """Fetch currently-active public stories. Returns [] if none."""
     username = clean_username(username)
     out = []
-    try:
-        from curl_cffi.requests import AsyncSession
-        async with AsyncSession(impersonate="chrome120") as s:
-            r = await s.get(f"https://www.tikwm.com/api/user/story?unique_id={username}", timeout=15)
-            if r.status_code == 200:
-                j = r.json()
-                if j.get("code") == 0:
-                    for it in j["data"].get("videos", []):
-                        m = _pick_media(it)
-                        if m["id"]:
-                            out.append(m)
-    except Exception:
-        pass
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Referer": "https://tikwm.com/",
+        "Origin": "https://tikwm.com",
+    }
+    for host in ("https://www.tikwm.com", "https://tikwm.com"):
+        try:
+            from curl_cffi.requests import AsyncSession
+            async with AsyncSession(impersonate="chrome120") as s:
+                # 1) Try POST
+                r = await s.post(f"{host}/api/user/story", data={"unique_id": username}, headers=headers, timeout=12)
+                if r.status_code == 200:
+                    j = r.json()
+                    if j.get("code") == 0:
+                        for it in j.get("data", {}).get("videos", []):
+                            m = _pick_media(it)
+                            if m["id"]:
+                                out.append(m)
+                        if out:
+                            return out
+                # 2) Fallback to GET
+                r = await s.get(f"{host}/api/user/story?unique_id={username}", headers=headers, timeout=12)
+                if r.status_code == 200:
+                    j = r.json()
+                    if j.get("code") == 0:
+                        for it in j.get("data", {}).get("videos", []):
+                            m = _pick_media(it)
+                            if m["id"]:
+                                out.append(m)
+                        if out:
+                            return out
+        except Exception:
+            pass
     return out
 
 

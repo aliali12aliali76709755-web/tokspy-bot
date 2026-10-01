@@ -1126,6 +1126,7 @@ def _track(p: dict) -> dict:
         "nickname": p.get("nickname"),
         "uniqueId": p.get("uniqueId"),
         "signature": p.get("signature"),
+        "bioLink": p.get("bioLink"),
         "avatar": _akey(p.get("avatar")),
         "privateAccount": p.get("privateAccount"),
         "verified": p.get("verified"),
@@ -1541,35 +1542,58 @@ async def _download_bytes(url, limit=48 * 1024 * 1024):
 
 async def _send_media(context, chat_id, uid, m, kind):
     """Download and send a story/post as actual video/photos (never raw links)."""
-    label = {"story": "📸 ستوري", "high": "⭐ مقطع مميّز"}.get(kind, "🎬 منشور جديد")
-    parts = [f"{label} من @{F.esc(uid)}"]
+    label = {"story": "📸 ستوري جديدة", "high": "⭐ مقطع مميّز"}.get(kind, "🎬 منشور جديد")
+    parts = [
+        f"🔔 <b>تنبيه مراقبة: {label}</b>",
+        f"👤 <b>الحساب:</b> @{F.esc(uid)}",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
     if m.get("title"):
-        parts.append(F.esc(m["title"]))
+        parts.append(f"📝 <b>الوصف:</b> {F.esc(m['title'])}")
     if m.get("create_time"):
-        parts.append(f"📅 {F.fmt_ts(m['create_time'])}")
-    if m.get("play_count") is not None:
+        parts.append(f"📅 <b>الوقت:</b> {F.fmt_ts(m['create_time'])}")
+    if m.get("play_count") is not None and m.get("play_count") > 0:
         parts.append(
             f"<tg-emoji emoji-id=\"6037397706505195857\">👁</tg-emoji> {F.fmt_num(m.get('play_count')).split(' ')[0]}  "
             f"<tg-emoji emoji-id=\"5920332441502883031\">❤️</tg-emoji> {F.fmt_num(m.get('digg_count')).split(' ')[0]}  "
             f"💬 {F.fmt_num(m.get('comment_count')).split(' ')[0]}"
         )
-    cap = "\n".join(lines)
+    cap = "\n".join(parts)
+    
+    # If media lacks direct stream or images, try to resolve via downloader
+    if not m.get("play") and not m.get("images") and m.get("id"):
+        try:
+            dl = await tk.download_video(f"https://www.tiktok.com/@{uid}/video/{m['id']}")
+            if dl:
+                if dl.get("play"):
+                    m["play"] = dl["play"]
+                if dl.get("images"):
+                    m["images"] = dl["images"]
+                if dl.get("cover") and not m.get("cover"):
+                    m["cover"] = dl["cover"]
+                if dl.get("music") and not m.get("music"):
+                    m["music"] = dl["music"]
+        except Exception as e:
+            log.warning("failed to fetch full media download in _send_media: %s", e)
+
     kb = None
     if isinstance(m.get("music"), str) and m["music"].startswith("http") and m.get("id"):
         await cache_audio(str(m["id"]), m["music"], title=(m.get("title") or "TikTok Audio"))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎵 تنزيل الأغنية (MP3)", callback_data=f"dl_audio:{m['id']}")]])
+
     try:
         imgs = m.get("images") or []
         if len(imgs) == 1:
             u = imgs[0]
+            b = await _download_bytes(u)
+            if b:
+                await context.bot.send_photo(chat_id, photo=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+                return
             try:
                 await context.bot.send_photo(chat_id, photo=u, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
                 return
             except Exception:
-                b = await _download_bytes(u)
-                if b:
-                    await context.bot.send_photo(chat_id, photo=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
-                    return
+                pass
         elif len(imgs) > 1:
             media = []
             for i, u in enumerate(imgs[:10]):
@@ -1589,6 +1613,13 @@ async def _send_media(context, chat_id, uid, m, kind):
 
         play_url = m.get("play")
         if play_url and not str(play_url).endswith(".mp3"):
+            b = await _download_bytes(play_url)
+            if b:
+                await context.bot.send_video(
+                    chat_id, video=b, caption=cap,
+                    parse_mode=ParseMode.HTML, reply_markup=kb,
+                )
+                return
             try:
                 await context.bot.send_video(
                     chat_id, video=play_url, caption=cap,
@@ -1596,15 +1627,16 @@ async def _send_media(context, chat_id, uid, m, kind):
                 )
                 return
             except Exception:
-                b = await _download_bytes(play_url)
-                if b:
-                    await context.bot.send_video(
-                        chat_id, video=b, caption=cap,
-                        parse_mode=ParseMode.HTML, reply_markup=kb,
-                    )
-                    return
+                pass
 
         if m.get("cover"):
+            b = await _download_bytes(m["cover"])
+            if b:
+                await context.bot.send_photo(
+                    chat_id, photo=b, caption=cap,
+                    parse_mode=ParseMode.HTML, reply_markup=kb,
+                )
+                return
             try:
                 await context.bot.send_photo(
                     chat_id, photo=m["cover"], caption=cap,
@@ -1612,16 +1644,11 @@ async def _send_media(context, chat_id, uid, m, kind):
                 )
                 return
             except Exception:
-                b = await _download_bytes(m["cover"])
-                if b:
-                    await context.bot.send_photo(
-                        chat_id, photo=b, caption=cap,
-                        parse_mode=ParseMode.HTML, reply_markup=kb,
-                    )
-                    return
+                pass
 
         await context.bot.send_message(chat_id, cap, parse_mode=ParseMode.HTML)
     except Exception as e:
+        log.warning("send media failed: %s", e)
         log.warning("send media failed: %s", e)
         try:
             await context.bot.send_message(chat_id, cap + "\n⚠️ تعذّر إرسال الوسائط.", parse_mode=ParseMode.HTML)
@@ -1640,82 +1667,125 @@ async def _process_single_monitor(context: ContextTypes.DEFAULT_TYPE, m: dict):
     last = m.get("last") or {}
     cur = _track(p)
     alerts = []
+    chat = m["telegram_id"]
+    update = {"last": cur}
 
+    # 1) Deleted videos
     ov, nv = last.get("videoCount") or 0, cur.get("videoCount") or 0
     if nv < ov and ov:
-        alerts.append(f"🗑 <b>حذف {ov-nv} فيديو.</b>")
+        alerts.append(f"🗑 <b>قام بحذف {ov-nv} فيديو من الحساب!</b>")
 
+    # 2) Nickname / Display Name
     if last.get("nickname") and cur.get("nickname") and last["nickname"] != cur["nickname"]:
-        alerts.append(f"📛 غيّر الاسم:\n{F.esc(last['nickname'])} ← {F.esc(cur['nickname'])}")
+        alerts.append(f"📛 <b>غيّر الاسم:</b>\n<b>السابق:</b> {F.esc(last['nickname'])}\n<b>الجديد:</b> {F.esc(cur['nickname'])}")
+
+    # 3) Username / Handle (update monitor record so future checks work)
     if last.get("uniqueId") and cur.get("uniqueId") and last["uniqueId"] != cur["uniqueId"]:
-        alerts.append(f"✏️ غيّر اليوزر: @{last['uniqueId']} ← @{cur['uniqueId']}")
+        old_u, new_u = last["uniqueId"], cur["uniqueId"]
+        alerts.append(f"✏️ <b>غيّر اليوزر:</b> @{old_u} ← @{new_u}")
+        update["uniqueId"] = new_u
+        uid = new_u
+
+    # 4) Bio / Signature
     if "signature" in last and last.get("signature") != cur.get("signature"):
-        alerts.append(f"📝 غيّر البايو:\n<i>{F.esc(cur.get('signature')) or '—'}</i>")
+        old_bio = F.esc(last.get("signature")) or "—"
+        new_bio = F.esc(cur.get("signature")) or "—"
+        alerts.append(f"📝 <b>غيّر البايو (الوصف):</b>\n<b>السابق:</b> <i>{old_bio}</i>\n<b>الجديد:</b> <i>{new_bio}</i>")
+
+    # 5) Bio Link
+    if "bioLink" in last and last.get("bioLink") != cur.get("bioLink"):
+        new_link = cur.get("bioLink")
+        if new_link:
+            alerts.append(f"🔗 <b>أضاف/غيّر الرابط في البايو:</b>\n{F.esc(new_link)}")
+        else:
+            alerts.append("🔗 <b>قام بحذف الرابط من البايو.</b>")
+
+    # 6) Avatar (Profile Picture) - send alert + the actual image
+    avatar_changed = False
     if last.get("avatar") and cur.get("avatar") and _akey(last["avatar"]) != cur["avatar"]:
-        alerts.append("🖼 غيّر صورة الحساب.")
+        avatar_changed = True
+        alerts.append("🖼 <b>قام بتغيير صورة الملف الشخصي!</b>")
+
+    # 7) Privacy (Public / Private)
     if last.get("privateAccount") is not None and last.get("privateAccount") != cur.get("privateAccount"):
-        alerts.append("🔒 حوّل الحساب إلى <b>خاص</b>." if cur.get("privateAccount") else "🔓 حوّل الحساب إلى <b>عام</b>.")
+        alerts.append("🔒 <b>حوّل الحساب إلى خاص (Private).</b>" if cur.get("privateAccount") else "🔓 <b>حوّل الحساب إلى عام (Public).</b>")
+
+    # 8) Verification Badge
     if last.get("verified") is not None and last.get("verified") != cur.get("verified"):
-        alerts.append("✔️ أصبح الحساب موثّقاً." if cur.get("verified") else "❌ فقد التوثيق.")
+        alerts.append("✔️ <b>أصبح الحساب موثّقاً رسمياً!</b>" if cur.get("verified") else "❌ <b>تمت إزالة علامة التوثيق.</b>")
 
+    # 9) Followers Count
     of, nf = last.get("followerCount") or 0, cur.get("followerCount") or 0
-    if of and nf != of:
+    if of and nf != of and abs(nf - of) >= 5:
         arrow = "📈" if nf > of else "📉"
-        alerts.append(f"{arrow} المتابعون: {nf-of:+,} (الآن {F.fmt_num(nf)})")
-    og, ng = last.get("followingCount") or 0, cur.get("followingCount") or 0
-    if og and ng != og:
-        alerts.append(f"➡️ قائمة (يتابع): {ng-og:+,} (الآن {F.fmt_num(ng)})")
+        alerts.append(f"{arrow} <b>المتابعون:</b> {nf-of:+,} (الإجمالي الآن: {F.fmt_num(nf)})")
 
+    # 10) Following Count
+    og, ng = last.get("followingCount") or 0, cur.get("followingCount") or 0
+    if og and ng != og and abs(ng - og) >= 5:
+        alerts.append(f"➡️ <b>قائمة المتابَعين (Following):</b> {ng-og:+,} (الآن {F.fmt_num(ng)})")
+
+    # Send text alert if profile changed
     if alerts:
-        header = f"🔔 <b>تنبيه مراقبة</b> @{uid}\n━━━━━━━━━━\n"
+        header = f"🔔 <b>تنبيه مراقبة</b> @{F.esc(uid)}\n━━━━━━━━━━\n"
         try:
             await context.bot.send_message(
-                m["telegram_id"], header + "\n".join(alerts), parse_mode=ParseMode.HTML,
+                chat, header + "\n\n".join(alerts), parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
         except Exception as e:
             log.warning("alert send failed: %s", e)
 
-    update = {"last": cur}
-    chat = m["telegram_id"]
+    # If avatar changed, send the new photo directly
+    if avatar_changed and p.get("avatar"):
+        try:
+            b_av = await _download_bytes(p.get("avatar"))
+            if b_av:
+                await context.bot.send_photo(
+                    chat,
+                    photo=b_av,
+                    caption=f"🖼 <b>الصورة الجديدة لملف @{F.esc(uid)} الشخصي:</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+        except Exception as e:
+            log.warning("avatar photo alert failed: %s", e)
 
-    # --- stories: fetch & send new ones ---
+    # --- stories: fetch & send new ones directly ---
     try:
         stories = await tk.fetch_stories(uid)
         known_s = m.get("known_stories")
         if known_s is not None:
             ks = set(known_s)
-            for s in stories:
-                if s["id"] not in ks:
-                    await _send_media(context, chat, uid, s, "story")
+            new_stories = [s for s in stories if s["id"] not in ks]
+            for s in new_stories:
+                await _send_media(context, chat, uid, s, "story")
         update["known_stories"] = list(dict.fromkeys((known_s or []) + [s["id"] for s in stories]))[-60:]
     except Exception as e:
         log.warning("story handling failed: %s", e)
 
-    # --- posts: fetch & send new ones (fallback to notify if source blocked) ---
+    # --- posts: fetch & send new ones directly ---
     try:
         posts = await tk.fetch_posts(uid, 6)
-        if posts is None:
-            if nv > ov:
+        known_v = m.get("known_videos")
+        if known_v is not None:
+            kv = set(known_v)
+            new_posts = [pp for pp in (posts or []) if pp.get("id") and pp["id"] not in kv]
+            if new_posts:
+                for pp in reversed(new_posts):  # oldest first
+                    await _send_media(context, chat, uid, pp, "post")
+            elif nv > ov:
+                # Video count increased but posts scraper didn't return list immediately
                 await context.bot.send_message(
                     chat,
-                    f"🎬 <b>@{F.esc(uid)} نشر {nv-ov} فيديو جديد!</b>\n"
-                    "(تعذّر جلب المحتوى تلقائياً من هذا السيرفر — افتح الحساب لمشاهدته)",
+                    f"🎬 <b>تنبيه مراقبة: منشور جديد!</b>\n"
+                    f"👤 <b>الحساب:</b> @{F.esc(uid)}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"قام بنشر <b>{nv - ov}</b> فيديو جديد للتو! 🚀\n"
+                    f"يمكنك فتح الحساب مباشرة لمشاهدته أو إرسال رابطه لتحميله بدون علامة مائية.",
                     parse_mode=ParseMode.HTML,
                 )
-        else:
-            known_v = m.get("known_videos")
-            if known_v is not None:
-                kv = set(known_v)
-                for pp in reversed(posts):  # oldest first
-                    if pp["id"] not in kv:
-                        media = pp
-                        if not media.get("play") and not media.get("images"):
-                            dl = await tk.download_video(f"https://www.tiktok.com/@{uid}/video/{pp['id']}")
-                            if dl:
-                                media = tk._pick_media(dl)
-                        await _send_media(context, chat, uid, media, "post")
-            update["known_videos"] = list(dict.fromkeys((known_v or []) + [pp["id"] for pp in posts]))[-80:]
+        if posts:
+            update["known_videos"] = list(dict.fromkeys((known_v or []) + [pp["id"] for pp in posts if pp.get("id")]))[-80:]
     except Exception as e:
         log.warning("posts handling failed: %s", e)
 
@@ -2241,7 +2311,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(~filters.COMMAND, router))
 
-    app.job_queue.run_repeating(monitor_job, interval=180, first=20)
+    app.job_queue.run_repeating(monitor_job, interval=90, first=15)
     app.job_queue.run_repeating(impersonation_job, interval=6 * 3600, first=300)
     app.job_queue.run_repeating(weekly_report_job, interval=7 * 24 * 3600, first=600)
 
