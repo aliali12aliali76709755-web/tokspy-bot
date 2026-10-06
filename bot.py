@@ -1613,41 +1613,46 @@ async def _send_media(context, chat_id, uid, m, kind):
         imgs = m.get("images") or []
         if len(imgs) == 1:
             u = imgs[0]
-            b = await _download_bytes(u)
-            if b:
-                await bot.send_photo(chat_id, photo=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
-                return
             try:
                 await bot.send_photo(chat_id, photo=u, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
                 return
             except Exception:
-                pass
+                b = await _download_bytes(u)
+                if b:
+                    await bot.send_photo(chat_id, photo=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb)
+                    return
         elif len(imgs) > 1:
             media = []
             for i, u in enumerate(imgs[:10]):
-                b = await _download_bytes(u)
-                item_media = b if b else u
                 if i == 0:
-                    media.append(InputMediaPhoto(media=item_media, caption=cap, parse_mode=ParseMode.HTML))
+                    media.append(InputMediaPhoto(media=u, caption=cap, parse_mode=ParseMode.HTML))
                 else:
-                    media.append(InputMediaPhoto(media=item_media))
+                    media.append(InputMediaPhoto(media=u))
             try:
                 await bot.send_media_group(chat_id, media=media)
                 if kb:
                     await bot.send_message(chat_id, "📊 أدوات المنشور:", reply_markup=kb)
                 return
             except Exception as e:
-                log.warning("send_media_group failed: %s", e)
+                # Fallback to downloading bytes
+                media_bytes = []
+                for i, u in enumerate(imgs[:10]):
+                    b = await _download_bytes(u)
+                    item_media = b if b else u
+                    if i == 0:
+                        media_bytes.append(InputMediaPhoto(media=item_media, caption=cap, parse_mode=ParseMode.HTML))
+                    else:
+                        media_bytes.append(InputMediaPhoto(media=item_media))
+                try:
+                    await bot.send_media_group(chat_id, media=media_bytes)
+                    if kb:
+                        await bot.send_message(chat_id, "📊 أدوات المنشور:", reply_markup=kb)
+                    return
+                except Exception:
+                    pass
 
         play_url = m.get("play")
         if play_url and not str(play_url).endswith(".mp3"):
-            b = await _download_bytes(play_url)
-            if b:
-                await bot.send_video(
-                    chat_id, video=b, caption=cap,
-                    parse_mode=ParseMode.HTML, reply_markup=kb,
-                )
-                return
             try:
                 await bot.send_video(
                     chat_id, video=play_url, caption=cap,
@@ -1655,16 +1660,15 @@ async def _send_media(context, chat_id, uid, m, kind):
                 )
                 return
             except Exception:
-                pass
+                b = await _download_bytes(play_url)
+                if b:
+                    await bot.send_video(
+                        chat_id, video=b, caption=cap,
+                        parse_mode=ParseMode.HTML, reply_markup=kb,
+                    )
+                    return
 
         if m.get("cover"):
-            b = await _download_bytes(m["cover"])
-            if b:
-                await bot.send_photo(
-                    chat_id, photo=b, caption=cap,
-                    parse_mode=ParseMode.HTML, reply_markup=kb,
-                )
-                return
             try:
                 await bot.send_photo(
                     chat_id, photo=m["cover"], caption=cap,
@@ -1672,7 +1676,13 @@ async def _send_media(context, chat_id, uid, m, kind):
                 )
                 return
             except Exception:
-                pass
+                b = await _download_bytes(m["cover"])
+                if b:
+                    await bot.send_photo(
+                        chat_id, photo=b, caption=cap,
+                        parse_mode=ParseMode.HTML, reply_markup=kb,
+                    )
+                    return
 
         await bot.send_message(chat_id, cap, parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -2315,9 +2325,9 @@ def main():
     httpx_req = HTTPXRequest(
         connection_pool_size=300,
         pool_timeout=30.0,
-        connect_timeout=15.0,
-        read_timeout=15.0,
-        write_timeout=15.0,
+        connect_timeout=20.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
     )
     app: Application = (
         ApplicationBuilder()
