@@ -27,8 +27,13 @@ class BufferHandler(logging.Handler):
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 buf_handler = BufferHandler()
-buf_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+buf_handler.setFormatter(fmt)
 root_logger.addHandler(buf_handler)
+
+file_handler = logging.FileHandler("bot_run.log", encoding="utf-8")
+file_handler.setFormatter(fmt)
+root_logger.addHandler(file_handler)
 
 import bot
 import tiktok_service as tk
@@ -362,11 +367,17 @@ def run_bot_supervised():
         try:
             root_logger.info("Starting bot application (supervised)...")
             bot.main()
-        except (KeyboardInterrupt, SystemExit):
-            root_logger.info("Bot stopped intentionally.")
+        except KeyboardInterrupt:
+            root_logger.info("Bot stopped intentionally by user.")
             break
+        except SystemExit as e:
+            root_logger.warning("Bot received SystemExit (%s). Auto-restarting in 3 seconds...", e)
+            time.sleep(3)
         except Exception as e:
             root_logger.critical("Bot process crashed: %s. Auto-recovering in 3 seconds...", e, exc_info=True)
+            time.sleep(3)
+        except BaseException as e:
+            root_logger.critical("Bot unhandled base exception: %s. Auto-recovering in 3 seconds...", e, exc_info=True)
             time.sleep(3)
 
 if __name__ == "__main__":

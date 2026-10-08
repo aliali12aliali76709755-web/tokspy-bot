@@ -26,6 +26,23 @@ _pw = None
 _br = None
 _stealth = Stealth()
 _lock = asyncio.Lock()
+_call_count = 0
+
+
+async def _close_browser():
+    global _pw, _br
+    if _br is not None:
+        try:
+            await _br.close()
+        except Exception:
+            pass
+        _br = None
+    if _pw is not None:
+        try:
+            await _pw.stop()
+        except Exception:
+            pass
+        _pw = None
 
 
 def _find_executable():
@@ -40,13 +57,18 @@ def _find_executable():
 
 
 async def _ensure():
-    global _pw, _br
+    global _pw, _br, _call_count
+    _call_count += 1
+    if _call_count > 50:
+        await _close_browser()
+        _call_count = 1
     if _br is not None and _br.is_connected():
         return
+    await _close_browser()
     _pw = await async_playwright().start()
     kwargs = dict(
         headless=True,
-        args=["--no-sandbox"],
+        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
     )
     exe = _find_executable()
     if exe and os.path.exists(exe):

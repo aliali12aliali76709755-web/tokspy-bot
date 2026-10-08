@@ -629,6 +629,13 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                 os.remove(video_path)
             except Exception:
                 pass
+            try:
+                d = os.path.dirname(video_path)
+                if os.path.basename(d).startswith("tokspy_"):
+                    import shutil
+                    shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
 
 
 # ------------------------- text router -------------------------
