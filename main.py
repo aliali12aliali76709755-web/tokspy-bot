@@ -1,4 +1,19 @@
+import sys
 import os
+import glob
+
+# Ensure .local prefix site-packages is in sys.path for container runners
+for _sp in [
+    os.path.abspath(".local/lib/python3.11/site-packages"),
+    os.path.expanduser("/home/container/.local/lib/python3.11/site-packages"),
+] + glob.glob("/home/container/.local/lib/python*/site-packages") + glob.glob(".local/lib/python*/site-packages"):
+    if os.path.exists(_sp) and _sp not in sys.path:
+        sys.path.insert(0, _sp)
+
+import dns_accelerator
+from dotenv import load_dotenv
+load_dotenv()
+
 import threading
 import time
 import urllib.request
@@ -349,23 +364,53 @@ def run_http_server():
     server.serve_forever()
 
 def keep_alive():
-    """Ping the service every 120s to ensure Render never puts the instance to sleep."""
-    url = "https://tokspy-telegram-bot.onrender.com"
-    time.sleep(30)
+    """Ping local HTTP health check every 60s to ensure event loop and threads stay active."""
+    port = int(os.environ.get("PORT", "11648"))
+    local_url = f"http://127.0.0.1:{port}/health"
+    time.sleep(15)
     while True:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "TokSpyKeepAlive/1.0"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            req = urllib.request.Request(local_url, headers={"User-Agent": "TokSpyInternalKeepAlive/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 pass
         except Exception as e:
             root_logger.warning("KeepAlive ping notice: %s", e)
-        time.sleep(120)
+        time.sleep(60)
+
+def wisp_auto_renew():
+    """Keep free WispByte server renewed continuously every 60 minutes."""
+    wisp_cookie = os.environ.get("WISP_COOKIE")
+    if not wisp_cookie:
+        root_logger.warning("wisp_auto_renew: WISP_COOKIE not set, auto-renew disabled.")
+        return
+    root_logger.info("wisp_auto_renew worker active. First renewal now...")
+    while True:
+        try:
+            req = urllib.request.Request(
+                "https://wispbyte.com/client/api/server/start-captcha/rewarded",
+                data=b"{}",
+                headers={
+                    "Content-Type": "application/json",
+                    "Cookie": f"connect.sid={wisp_cookie}",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": "https://wispbyte.com/client/dashboard",
+                    "Origin": "https://wispbyte.com",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = resp.read().decode('utf-8', errors='ignore')
+                root_logger.info("WispByte auto-renew heartbeat: %s - %s", resp.status, data[:100])
+        except Exception as e:
+            root_logger.warning("WispByte auto-renew notice: %s", e)
+        time.sleep(3600)
 
 def run_bot_supervised():
     """Supervisor thread to auto-restart the bot immediately if it ever crashes."""
     while True:
         try:
             root_logger.info("Starting bot application (supervised)...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             bot.main()
         except KeyboardInterrupt:
             root_logger.info("Bot stopped intentionally by user.")
@@ -389,5 +434,8 @@ if __name__ == "__main__":
 
     t_ping = threading.Thread(target=keep_alive, daemon=True)
     t_ping.start()
+
+    t_renew = threading.Thread(target=wisp_auto_renew, daemon=True)
+    t_renew.start()
 
     run_bot_supervised()

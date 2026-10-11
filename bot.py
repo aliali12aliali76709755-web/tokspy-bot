@@ -5,6 +5,7 @@ account comparison, favorites, growth tracking, live monitoring & alerts
 (new video / deleted videos / name change / follower spikes), no-watermark
 video download, and a Telegram Stars VIP subscription + admin tools.
 """
+import dns_accelerator
 import os
 import logging
 import asyncio
@@ -23,6 +24,7 @@ from telegram import (
     LabeledPrice,
     InputMediaPhoto,
     BotCommand,
+    MenuButtonCommands,
 )
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
@@ -63,17 +65,34 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 log = logging.getLogger("tiktokbot")
 
 import certifi
-client = AsyncIOMotorClient(os.environ["MONGO_URL"], tlsCAFile=certifi.where(), maxPoolSize=100, minPoolSize=10)
-db = client[os.environ["DB_NAME"]]
+client = None
+db = None
+
+def init_db():
+    global client, db
+    client = AsyncIOMotorClient(os.environ["MONGO_URL"], tlsCAFile=certifi.where(), maxPoolSize=100, minPoolSize=10)
+    db = client[os.environ["DB_NAME"]]
+    return db
+
+try:
+    init_db()
+except Exception:
+    pass
 
 # High-load in-memory cache
 KNOWN_USERS: set[int] = set()
 LAST_START_TIMES: dict[int, float] = {}
 
-USER_SAVE_SEM = asyncio.Semaphore(25)
+USER_SAVE_SEM = None
+
+def get_user_save_sem():
+    global USER_SAVE_SEM
+    if USER_SAVE_SEM is None:
+        USER_SAVE_SEM = asyncio.Semaphore(25)
+    return USER_SAVE_SEM
 
 async def _save_user_background(tid: int, tg_user):
-    async with USER_SAVE_SEM:
+    async with get_user_save_sem():
         try:
             await db.users.update_one(
                 {"telegram_id": tid},
@@ -1842,19 +1861,27 @@ async def _process_single_monitor(context: ContextTypes.DEFAULT_TYPE, m: dict):
 
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    mons = await db.monitors.find({}).to_list(10000)
-    if not mons:
-        return
-    sem = asyncio.Semaphore(20)  # Concurrency limit
-    
-    async def worker(m):
-        async with sem:
-            try:
-                await asyncio.wait_for(_process_single_monitor(context, m), timeout=45.0)
-            except Exception as e:
-                log.warning("monitor job worker error: %s", e)
-                
-    await asyncio.gather(*(worker(m) for m in mons))
+    try:
+        mons = await db.monitors.find({}).to_list(1000)
+        if not mons:
+            return
+        sem = asyncio.Semaphore(4)  # Concurrency limit (keeps network completely responsive for users)
+        
+        async def worker(m):
+            async with sem:
+                try:
+                    await asyncio.wait_for(_process_single_monitor(context, m), timeout=10.0)
+                except Exception as e:
+                    pass
+                await asyncio.sleep(0.2)
+                    
+        # Detached background execution ensures job runner never hangs
+        async def _run_all():
+            await asyncio.gather(*(worker(m) for m in mons), return_exceptions=True)
+
+        asyncio.create_task(_run_all())
+    except Exception as e:
+        log.warning("monitor job error: %s", e)
 
 
 # ------------------------- settings & forced subscription -------------------------
@@ -2075,7 +2102,7 @@ async def admin_stats_text() -> str:
         f"• 👁 <b>الزيارات الإجمالية:</b> <code>{web_visits:,}</code> زائر\n"
         f"• 🖱 <b>التحويلات إلى البوت:</b> <code>{web_clicks:,}</code> نقرة\n"
         f"• 🎯 <b>المستخدمين الفعليين (بدء البوت):</b> <code>{web_convs:,}</code> (معدل التحويل: <code>{conv_rate:.1f}%</code>)\n"
-        f"🔗 <code>https://tokspy-telegram-bot.onrender.com</code>"
+        f"🔗 <code>http://78.154.103.52:11648</code>"
     )
 
 
@@ -2321,20 +2348,26 @@ async def _post_init(app: Application):
         await app.bot.set_my_short_description(short_description=i18n.BOT_SEO["ar"]["short_description"])
         await app.bot.set_my_description(description=i18n.BOT_SEO["ar"]["description"])
         await app.bot.set_my_commands(commands=i18n.BOT_COMMANDS["ar"])
-        log.info("Multilingual SEO and commands registered successfully.")
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        log.info("Multilingual SEO, commands, and standard menu button registered successfully.")
     except Exception as e:
-        log.warning("Default SEO setup failed: %s", e)
+        log.warning("Default SEO / menu setup failed: %s", e)
 
+    init_db()
     await _preload_known_users()
 
 
 def main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    init_db()
     httpx_req = HTTPXRequest(
-        connection_pool_size=300,
-        pool_timeout=30.0,
-        connect_timeout=20.0,
-        read_timeout=60.0,
-        write_timeout=60.0,
+        connection_pool_size=150,
+        pool_timeout=15.0,
+        connect_timeout=5.0,
+        read_timeout=30.0,
+        write_timeout=15.0,
+        http_version="1.1",
     )
     app: Application = (
         ApplicationBuilder()
@@ -2360,12 +2393,18 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(~filters.COMMAND, router))
 
-    app.job_queue.run_repeating(monitor_job, interval=90, first=15)
+    app.job_queue.run_repeating(monitor_job, interval=max(INTERVAL * 60, 600), first=60)
     app.job_queue.run_repeating(impersonation_job, interval=6 * 3600, first=300)
     app.job_queue.run_repeating(weekly_report_job, interval=7 * 24 * 3600, first=600)
 
     log.info("Bot starting (high-concurrency polling)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False, bootstrap_retries=-1)
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+        bootstrap_retries=-1,
+        stop_signals=None,
+        close_loop=False
+    )
 
 
 if __name__ == "__main__":
