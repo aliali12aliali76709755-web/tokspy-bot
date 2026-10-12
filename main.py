@@ -2,6 +2,11 @@ import sys
 import os
 import glob
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # Ensure .local prefix site-packages is in sys.path for container runners
 for _sp in [
     os.path.abspath(".local/lib/python3.11/site-packages"),
@@ -29,7 +34,7 @@ import httpx
 import pymongo
 import certifi
 
-LOG_BUFFER = deque(maxlen=200)
+LOG_BUFFER = deque(maxlen=1000)
 
 class BufferHandler(logging.Handler):
     def emit(self, record):
@@ -67,7 +72,7 @@ VISIT_QUEUE = queue.Queue()
 def visitor_flush_worker():
     """Worker thread that flushes visitor analytics to MongoDB periodically without blocking HTTP requests."""
     mongo_url = os.environ.get("MONGO_URL")
-    db_name = os.environ.get("DB_NAME", "tokspy_db")
+    db_name = os.environ.get("DB_NAME", "bot_7933086359")
     if not mongo_url:
         return
     
@@ -172,9 +177,36 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
+        if parsed.path == "/wisp_renew":
+            cookie = os.environ.get("WISP_COOKIE", "")
+            out = {}
+            try:
+                req = urllib.request.Request(
+                    "https://wispbyte.com/client/api/server/start-captcha/rewarded",
+                    data=b"{}",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Cookie": f"connect.sid={cookie}",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "Referer": "https://wispbyte.com/client/dashboard",
+                        "Origin": "https://wispbyte.com",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    out = {"status": resp.status, "body": json.loads(resp.read().decode('utf-8', errors='ignore'))}
+            except Exception as e:
+                out = {"error": str(e)}
+            payload = json.dumps(out).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         if parsed.path in ("/api/stats", "/stats"):
             mongo_url = os.environ.get("MONGO_URL")
-            db_name = os.environ.get("DB_NAME", "tokspy_db")
+            db_name = os.environ.get("DB_NAME", "bot_7933086359")
             try:
                 client = pymongo.MongoClient(mongo_url, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=2000)
                 doc = client[db_name]["web_stats"].find_one({"_id": "global"}) or {}
@@ -330,7 +362,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
-        if parsed.path in ("/favicon.ico", "/robots.txt", "/apple-touch-icon.png", "/healthz"):
+        if parsed.path in ("/favicon.ico", "/robots.txt", "/apple-touch-icon.png", "/healthz", "/health"):
             self.send_response(204)
             self.end_headers()
             return
@@ -359,7 +391,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         root_logger.info("HTTP %s - " + format, self.address_string(), *args)
 
 def run_http_server():
-    port = int(os.environ.get("PORT", "10000"))
+    port = int(os.environ.get("PORT", "11648"))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 

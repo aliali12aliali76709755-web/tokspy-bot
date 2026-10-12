@@ -84,7 +84,7 @@ BOT_SEO = {
     }
 }
 
-# Bot Commands per language
+# Bot Commands per language (Public commands for normal users)
 BOT_COMMANDS = {
     "ar": [
         BotCommand("start", "بدء استخدام البوت"),
@@ -121,6 +121,25 @@ BOT_COMMANDS = {
         BotCommand("lang", "Dili değiştir"),
         BotCommand("support", "Teknik Destek"),
         BotCommand("help", "Yardım ve bilgi"),
+    ],
+}
+
+ADMIN_COMMANDS = {
+    "ar": [
+        BotCommand("start", "بدء استخدام البوت"),
+        BotCommand("admin", "🛠 لوحة تحكم الإدارة"),
+        BotCommand("broadcast", "📢 إذاعة جماعية"),
+        BotCommand("lang", "تغيير لغة البوت"),
+        BotCommand("support", "الدعم الفني والمساعدة"),
+        BotCommand("help", "معلومات وكيفية الاستخدام"),
+    ],
+    "en": [
+        BotCommand("start", "Start the bot"),
+        BotCommand("admin", "🛠 Admin Control Panel"),
+        BotCommand("broadcast", "📢 Broadcast"),
+        BotCommand("lang", "Change language"),
+        BotCommand("support", "Technical Support"),
+        BotCommand("help", "Help & info"),
     ],
 }
 
@@ -304,11 +323,13 @@ def get_start_text(lang: str) -> str:
     return f"✨ <b>{title}</b>\n\n{body}"
 
 
-def get_main_keyboard(lang: str) -> InlineKeyboardMarkup:
+def get_main_keyboard(lang: str, is_admin: bool = False) -> InlineKeyboardMarkup:
     """Builds the main interactive keyboard in the user's language."""
     kb = [
         [InlineKeyboardButton(get_msg(lang, "btn_mon"), callback_data="main_monitors")],
     ]
+    if is_admin:
+        kb.append([InlineKeyboardButton("🛠 لوحة تحكم الإدارة", callback_data="adm:home")])
     return InlineKeyboardMarkup(kb)
 
 
@@ -326,7 +347,7 @@ def get_language_selection_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def get_support_keyboard(lang: str, support_id: str = "6641619062") -> InlineKeyboardMarkup:
+def get_support_keyboard(lang: str, support_id: str = "7933086359") -> InlineKeyboardMarkup:
     """Builds the support keyboard with user-friendly direct contact."""
     btn_text = get_msg(lang, "btn_contact_support")
     back_text = get_msg(lang, "btn_back_home")

@@ -5,6 +5,11 @@ account comparison, favorites, growth tracking, live monitoring & alerts
 (new video / deleted videos / name change / follower spikes), no-watermark
 video download, and a Telegram Stars VIP subscription + admin tools.
 """
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 import dns_accelerator
 import os
 import logging
@@ -25,6 +30,8 @@ from telegram import (
     InputMediaPhoto,
     BotCommand,
     MenuButtonCommands,
+    BotCommandScopeDefault,
+    BotCommandScopeChat,
 )
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
@@ -49,13 +56,18 @@ ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "6641619062"))
-SUPPORT_ID = 6641619062
-SUPPORT_USERNAME = "DRK450"
-SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
+_raw_admins = os.environ.get("ADMIN_ID", "7933086359,8625825633,6641619062")
+ADMIN_IDS: set[int] = {7933086359, 8625825633, 6641619062}
+for _a in str(_raw_admins).replace(";", ",").split(","):
+    _a = _a.strip()
+    if _a.isdigit():
+        ADMIN_IDS.add(int(_a))
+ADMIN_ID = 7933086359
+SUPPORT_ID = ADMIN_ID
+SUPPORT_URL = f"tg://user?id={ADMIN_ID}"
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-DEVELOPER = os.environ.get("DEVELOPER", "DRK450").lstrip("@")
-ADMIN_SESSIONS: set[int] = set()
+DEVELOPER = ""
+ADMIN_SESSIONS: set[int] = set(ADMIN_IDS)
 PRICE_MONTH = int(os.environ.get("VIP_PRICE_MONTH", "250"))
 PRICE_LIFE = int(os.environ.get("VIP_PRICE_LIFETIME", "1500"))
 INTERVAL = int(os.environ.get("MONITOR_INTERVAL_MIN", "30"))
@@ -360,7 +372,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_lang = await get_effective_lang(context, user)
     start_text = i18n.get_start_text(user_lang)
-    main_kb = i18n.get_main_keyboard(user_lang)
+    admin_user = is_admin(tid)
+    main_kb = i18n.get_main_keyboard(user_lang, is_admin=admin_user)
+
+    if admin_user:
+        try:
+            await context.bot.set_my_commands(
+                commands=i18n.ADMIN_COMMANDS.get(user_lang, i18n.ADMIN_COMMANDS["ar"]),
+                scope=BotCommandScopeChat(chat_id=tid)
+            )
+        except Exception:
+            pass
 
     if update.callback_query:
         try:
@@ -677,12 +699,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
     
     st = context.user_data.get("await")
-    if st == "admin_pw":
-        context.user_data.pop("await", None)
-        if text == ADMIN_PASSWORD or is_admin(tid):
-            ADMIN_SESSIONS.add(tid)
-            return await admin_panel(update, context)
-        return await msg.reply_text("❌ كلمة سر خاطئة.")
     if st == "broadcast" and is_admin(tid):
         context.user_data.pop("await", None)
         return await _do_broadcast(update, context)
@@ -711,17 +727,22 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not p:
             return await msg.reply_text("❌ تعذّر جلب الحساب. تأكد من صحة اليوزر.")
         
-        # Check active stories right away
+        # Check active stories and existing videos right away
         stories = await tk.fetch_stories(uid)
         known_s = [s["id"] for s in stories] if stories else []
-        
+        try:
+            curr_posts = await tk.fetch_posts(uid, 6)
+            known_v = [pp["id"] for pp in curr_posts if pp.get("id")] if curr_posts else []
+        except Exception:
+            known_v = []
+
         await db.monitors.insert_one({
             "telegram_id": tid,
             "uniqueId": uid,
             "created_at": now().isoformat(),
             "last": _track(p),
             "known_stories": known_s,
-            "known_videos": [],
+            "known_videos": known_v,
         })
         await msg.reply_text(
             f"✅ بدأت مراقبة @{uid} ({count + 1}/{MAX_MONITORS}).\n\n"
@@ -740,11 +761,15 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ---- admin entry triggers ----
-    if is_admin(tid) and text.lower() in ("صويري", "صوري", "ادمن", "الادمن", "admin", "/admin", "/panel", "لوحة التحكم"):
+    if text.lower() in ("صويري", "صوري", "ادمن", "الادمن", "admin", "/admin", "/panel", "لوحة التحكم"):
+        if not is_admin(tid):
+            return
         ADMIN_SESSIONS.add(tid)
         return await admin_panel(update, context)
 
-    if is_admin(tid) and text.lower() in ("اذاعة", "إذاعة", "اداعة", "broadcast", "/broadcast", "/bc"):
+    if text.lower() in ("اذاعة", "إذاعة", "اداعة", "broadcast", "/broadcast", "/bc"):
+        if not is_admin(tid):
+            return
         ADMIN_SESSIONS.add(tid)
         context.user_data["await"] = "broadcast"
         return await msg.reply_text(
@@ -879,7 +904,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         confirm_txt = i18n.get_msg(new_lang, "lang_selected")
         await q.answer(confirm_txt)
         start_txt = i18n.get_start_text(new_lang)
-        kb = i18n.get_main_keyboard(new_lang)
+        kb = i18n.get_main_keyboard(new_lang, is_admin=is_admin(tid))
         try:
             return await q.message.edit_text(start_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
         except Exception:
@@ -890,7 +915,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action in ("back_home", "main_back_start"):
         start_txt = i18n.get_start_text(user_lang)
-        kb = i18n.get_main_keyboard(user_lang)
+        kb = i18n.get_main_keyboard(user_lang, is_admin=is_admin(tid))
         try:
             return await q.message.edit_text(start_txt, parse_mode=ParseMode.HTML, reply_markup=kb)
         except Exception:
@@ -983,7 +1008,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "👇 أو اضغط على الزر أدناه لمراقبة حساب تيك توك:\n"
             )
             return await context.bot.send_message(
-                chat_id=tid, text=txt, parse_mode=ParseMode.HTML, reply_markup=MAIN_KB
+                chat_id=tid, text=txt, parse_mode=ParseMode.HTML, reply_markup=i18n.get_main_keyboard("ar", is_admin=is_admin(tid))
             )
         else:
             try:
@@ -994,7 +1019,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "adm":
         if not is_admin(tid):
-            return await q.message.reply_text("🔐 غير مصرّح. أرسل «صويري» للدخول.")
+            return
         if arg == "home":
             return await q.message.reply_text(await admin_stats_text(), parse_mode=ParseMode.HTML, reply_markup=admin_kb())
         if arg == "stats":
@@ -1016,13 +1041,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s = await get_settings()
             chans = s.get("forced_channels") or []
             kb = [[InlineKeyboardButton(f"🗑 {c}", callback_data=f"adm:rmch:{c}")] for c in chans]
-            kb.append([InlineKeyboardButton("➕ إضافة قناة", callback_data="adm:addch")])
+            kb.append([InlineKeyboardButton("➕ إضافة قناة / قروب", callback_data="adm:addch")])
             kb.append([InlineKeyboardButton("⬅️ رجوع", callback_data="adm:home")])
-            body = "🔒 <b>الاشتراك الإجباري</b>\n" + ("\n".join(f"• {c}" for c in chans) if chans else "لا توجد قنوات مضافة.")
+            body = "🔒 <b>الاشتراك الإجباري (قنوات وقروبات)</b>\n\n" + ("\n".join(f"• {c}" for c in chans) if chans else "لا توجد قنوات أو قروبات مضافة حالياً.")
             return await q.message.reply_text(body, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         if arg == "addch":
             context.user_data["await"] = "add_channel"
-            return await q.message.reply_text("➕ أرسل يوزر القناة (مثال: <code>@mychannel</code>):", parse_mode=ParseMode.HTML)
+            return await q.message.reply_text(
+                "➕ <b>إضافة قناة أو قروب للاشتراك الإجباري</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "أرسل يوزر القناة أو القروب (مثال: <code>@mychannel</code> أو <code>@mygroup</code>):\n\n"
+                "⚠️ <b>ملاحظة هامة جداً:</b>\n"
+                "تأكد من رفع البوت <b>مشرفاً (أدمن)</b> داخل القناة أو القروب ليتمكن تليجرام من التحقق من اشتراك الأعضاء بنجاح.",
+                parse_mode=ParseMode.HTML
+            )
         if arg.startswith("rmch:"):
             ch = arg.split("rmch:", 1)[1]
             s = await get_settings()
@@ -1130,6 +1162,11 @@ async def add_monitor(q, tid, uid, context=None):
 
     stories = await tk.fetch_stories(uid)
     known_s = [s["id"] for s in stories] if stories else []
+    try:
+        curr_posts = await tk.fetch_posts(uid, 6)
+        known_v = [pp["id"] for pp in curr_posts if pp.get("id")] if curr_posts else []
+    except Exception:
+        known_v = []
 
     await db.monitors.insert_one({
         "telegram_id": tid,
@@ -1137,7 +1174,7 @@ async def add_monitor(q, tid, uid, context=None):
         "created_at": now().isoformat(),
         "last": _track(p),
         "known_stories": known_s,
-        "known_videos": [],
+        "known_videos": known_v,
     })
     await q.message.reply_text(
         f"✅ بدأت مراقبة @{uid} ({count + 1}/{MAX_MONITORS}).\n\n"
@@ -1835,7 +1872,11 @@ async def _process_single_monitor(context: ContextTypes.DEFAULT_TYPE, m: dict):
             posts = await tk.fetch_posts(uid, 6)
             known_v = m.get("known_videos") or []
             kv = set(known_v)
-            new_posts = [pp for pp in (posts or []) if pp.get("id") and pp["id"] not in kv]
+            if not kv and posts:
+                diff = max(1, min(len(posts), nv - ov))
+                new_posts = [pp for pp in posts[:diff] if pp.get("id")]
+            else:
+                new_posts = [pp for pp in (posts or []) if pp.get("id") and pp["id"] not in kv]
             if new_posts:
                 for pp in reversed(new_posts):  # oldest first
                     await _send_media(context, chat, uid, pp, "post")
@@ -1862,19 +1903,19 @@ async def _process_single_monitor(context: ContextTypes.DEFAULT_TYPE, m: dict):
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        mons = await db.monitors.find({}).to_list(1000)
+        mons = await db.monitors.find({}).to_list(10000)
         if not mons:
             return
-        sem = asyncio.Semaphore(4)  # Concurrency limit (keeps network completely responsive for users)
-        
+        sem = asyncio.Semaphore(15)  # Concurrency limit (keeps network responsive while scanning accounts fast)
+
         async def worker(m):
             async with sem:
                 try:
-                    await asyncio.wait_for(_process_single_monitor(context, m), timeout=10.0)
+                    await asyncio.wait_for(_process_single_monitor(context, m), timeout=45.0)
                 except Exception as e:
-                    pass
-                await asyncio.sleep(0.2)
-                    
+                    log.warning("monitor job worker error for %s: %s", m.get("uniqueId"), e)
+                await asyncio.sleep(0.05)
+
         # Detached background execution ensures job runner never hangs
         async def _run_all():
             await asyncio.gather(*(worker(m) for m in mons), return_exceptions=True)
@@ -1886,7 +1927,7 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------------- settings & forced subscription -------------------------
 def is_admin(tid: int) -> bool:
-    return tid == ADMIN_ID or tid == SUPPORT_ID or tid in ADMIN_SESSIONS
+    return tid in ADMIN_IDS
 
 
 _settings_cache: dict = {"_id": "settings", "forced_channels": []}
@@ -1958,33 +1999,49 @@ async def ensure_subscribed(
         clean_ch = ch.strip().rstrip("/").split("/")[-1].lstrip("@")
         if is_bot_target(ch):
             if clean_ch.lower() not in verified_bots:
-                missing.append((ch, True))
+                missing.append((ch, "bot", clean_ch))
         else:
             try:
                 mem = await context.bot.get_chat_member(ch, tid)
                 if mem.status in ("left", "kicked"):
-                    missing.append((ch, False))
+                    missing.append((ch, "channel", clean_ch))
             except Exception:
-                missing.append((ch, False))
+                missing.append((ch, "channel", clean_ch))
 
     if not missing:
         return True
 
     kb = []
-    for ch, is_bot in missing:
-        clean = ch.strip().rstrip("/").split("/")[-1].lstrip("@")
-        if is_bot:
-            kb.append([InlineKeyboardButton(f"🤖 دخول البوت: @{clean}", url=f"https://t.me/{clean}?start=tokspy")])
+    for ch, kind, clean in missing:
+        if ch.startswith("http"):
+            target_url = ch
         else:
-            kb.append([InlineKeyboardButton(f"📢 اشترك بالقناة: @{clean}", url=f"https://t.me/{clean}")])
+            target_url = f"https://t.me/{clean}"
+
+        if kind == "bot":
+            kb.append([InlineKeyboardButton(f"🤖 دخول البوت: @{clean}", url=f"{target_url}?start=tokspy")])
+        elif kind == "group" or "group" in clean.lower() or "قروب" in clean:
+            kb.append([InlineKeyboardButton(f"👥 انضم للقروب: @{clean}", url=target_url)])
+        else:
+            kb.append([InlineKeyboardButton(f"📢 اشترك بالقناة: @{clean}", url=target_url)])
 
     kb.append([InlineKeyboardButton("✅ تم الاشتراك — تفعيل البوت", callback_data="checksub")])
-    prompt_txt = (
-        "🔒 <b>تفعيل البوت مطلوب</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "لاستخدام ميزات البوت مجاناً، يرجى أولاً الدخول إلى البوت التالي والضغط على (<b>ابدأ / Start</b>):\n\n"
-        "ثم اضغط على زر <b>«✅ تم الاشتراك — تفعيل البوت»</b> أدناه للمتابعة مباشرة."
-    )
+    
+    has_bot = any(m[1] == "bot" for m in missing)
+    if has_bot:
+        prompt_txt = (
+            "🔒 <b>تفعيل البوت مطلوب</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "لاستخدام ميزات البوت مجاناً، يرجى أولاً إتمام الاشتراك أو الدخول للبوت والضغط على (<b>ابدأ / Start</b>):\n\n"
+            "ثم اضغط على زر <b>«✅ تم الاشتراك — تفعيل البوت»</b> أدناه للمتابعة مباشرة."
+        )
+    else:
+        prompt_txt = (
+            "🔒 <b>الاشتراك الإجباري مطلوب</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "لاستخدام ميزات البوت مجاناً، يرجى أولاً الاشتراك في القناة أو القروب المطلوب أدناه:\n\n"
+            "ثم اضغط على زر <b>«✅ تم الاشتراك — تفعيل البوت»</b> أدناه للمتابعة مباشرة."
+        )
     markup = InlineKeyboardMarkup(kb)
 
     if update.callback_query and update.callback_query.message:
@@ -2003,10 +2060,11 @@ async def ensure_subscribed(
 # ------------------------- admin panel -------------------------
 def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 الإحصائيات", callback_data="adm:stats"),
+        [InlineKeyboardButton("📊 الإحصائيات الشاملة", callback_data="adm:stats"),
          InlineKeyboardButton("📢 إذاعة جماعية", callback_data="adm:broadcast")],
-        [InlineKeyboardButton("🔒 الاشتراك الإجباري", callback_data="adm:forced")],
-        [InlineKeyboardButton("🔄 تحديث", callback_data="adm:home")],
+        [InlineKeyboardButton("🔒 الاشتراك الإجباري", callback_data="adm:forced"),
+         InlineKeyboardButton("🔄 تحديث اللوحة", callback_data="adm:home")],
+        [InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="back_home")]
     ])
 
 
@@ -2032,7 +2090,6 @@ async def _stats_counts():
     users_yesterday = await db.users.count_documents({
         "joined_at": {"$gte": yesterday_00_utc.isoformat(), "$lt": yesterday_end_utc.isoformat()}
     })
-    users_24h = await db.users.count_documents({"joined_at": {"$gte": last_24h_utc.isoformat()}})
     users_7d = await db.users.count_documents({"joined_at": {"$gte": last_7d_utc.isoformat()}})
     users_month = await db.users.count_documents({"joined_at": {"$gte": month_00_utc.isoformat()}})
 
@@ -2042,7 +2099,6 @@ async def _stats_counts():
     snaps_yesterday = await db.snapshots.count_documents({
         "ts": {"$gte": yesterday_00_utc.isoformat(), "$lt": yesterday_end_utc.isoformat()}
     })
-    snaps_24h = await db.snapshots.count_documents({"ts": {"$gte": last_24h_utc.isoformat()}})
 
     # Monitors & Active users
     total_monitors = await db.monitors.count_documents({})
@@ -2064,24 +2120,17 @@ async def _stats_counts():
         "mon_users_cnt": mon_users_cnt,
         "users_today": users_today,
         "users_yesterday": users_yesterday,
-        "users_24h": users_24h,
         "users_7d": users_7d,
         "users_month": users_month,
         "total_snaps": total_snaps,
         "snaps_today": snaps_today,
         "snaps_yesterday": snaps_yesterday,
-        "snaps_24h": snaps_24h,
         "total_monitors": total_monitors,
     }
 
 
 async def admin_stats_text() -> str:
     s = await _stats_counts()
-    web_doc = await db.web_stats.find_one({"_id": "global"}) or {}
-    web_visits = web_doc.get("total_visits", 0)
-    web_clicks = web_doc.get("bot_clicks", 0)
-    web_convs = web_doc.get("conversions", 0)
-    conv_rate = (web_convs / web_visits * 100) if web_visits > 0 else 0
 
     return (
         "🛠 <b>لوحة التحكم — الإحصائيات الشاملة</b>\n"
@@ -2091,18 +2140,12 @@ async def admin_stats_text() -> str:
         f"📈 <b>حركة المشتركين الجدد:</b>\n"
         f"• 📅 <b>اليوم (منذ 12:00 ص):</b> <code>{s['users_today']:,}</code> مستخدم جديد\n"
         f"• 📆 <b>أمس:</b> <code>{s['users_yesterday']:,}</code> مستخدم\n"
-        f"• ⏳ <b>آخر 24 ساعة:</b> <code>{s['users_24h']:,}</code> مستخدم\n"
         f"• 🗓 <b>آخر 7 أيام:</b> <code>{s['users_7d']:,}</code> مستخدم\n"
         f"• 📊 <b>هذا الشهر:</b> <code>{s['users_month']:,}</code> مستخدم\n\n"
         f"⚡ <b>نشاط البوت وعمليات الفحص:</b>\n"
         f"• 🔍 <b>إجمالي عمليات الفحص:</b> <code>{s['total_snaps']:,}</code> فحص\n"
         f"• 🔎 <b>فحوصات اليوم:</b> <code>{s['snaps_today']:,}</code> فحص (أمس: <code>{s['snaps_yesterday']:,}</code>)\n"
-        f"• 🔔 <b>حسابات تحت المراقبة (24/7):</b> <code>{s['total_monitors']}</code> حساب (لـ <code>{s['mon_users_cnt']}</code> مستخدم)\n\n"
-        f"🌐 <b>إحصائيات رابط الموقع (Landing Page):</b>\n"
-        f"• 👁 <b>الزيارات الإجمالية:</b> <code>{web_visits:,}</code> زائر\n"
-        f"• 🖱 <b>التحويلات إلى البوت:</b> <code>{web_clicks:,}</code> نقرة\n"
-        f"• 🎯 <b>المستخدمين الفعليين (بدء البوت):</b> <code>{web_convs:,}</code> (معدل التحويل: <code>{conv_rate:.1f}%</code>)\n"
-        f"🔗 <code>http://78.154.103.52:11648</code>"
+        f"• 🔔 <b>حسابات تحت المراقبة (24/7):</b> <code>{s['total_monitors']}</code> حساب (لـ <code>{s['mon_users_cnt']}</code> مستخدم)"
     )
 
 
@@ -2110,14 +2153,15 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     target = update.callback_query.message if update.callback_query else update.message
     if not is_admin(tid):
-        context.user_data["await"] = "admin_pw"
-        return await target.reply_text("🔐 أدخل كلمة السر للدخول للوحة التحكم:")
+        return
     await target.reply_text(await admin_stats_text(), parse_mode=ParseMode.HTML, reply_markup=admin_kb())
 
 
 async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["await"] = "admin_pw"
-    await update.effective_message.reply_text("🔐 أدخل كلمة السر للدخول للوحة التحكم:")
+    tid = update.effective_user.id
+    if not is_admin(tid):
+        return
+    await admin_panel(update, context)
 
 
 async def _broadcast_worker(bot, admin_chat_id: int, status_msg_id: int, source_chat_id: int, source_msg_id: int, text_fallback: str):
@@ -2237,9 +2281,30 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, ch: str):
     ch = ch.strip()
     if ch.startswith("https://t.me/"):
-        ch = "@" + ch.split("t.me/")[1].strip("/")
-    if not ch.startswith("@"):
+        target = ch.split("t.me/")[1].strip("/")
+        if not target.startswith("+") and not target.startswith("joinchat/"):
+            ch = "@" + target
+    elif not ch.startswith("@") and not ch.startswith("-100") and not ch.startswith("+"):
         ch = "@" + ch
+
+    chat_title = ch
+    chat_type = "القناة/القروب"
+    bot_is_admin = False
+    try:
+        chat_obj = await context.bot.get_chat(ch)
+        chat_title = chat_obj.title or ch
+        if chat_obj.type in ("group", "supergroup"):
+            chat_type = "القروب"
+        elif chat_obj.type == "channel":
+            chat_type = "القناة"
+        
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(chat_obj.id, me.id)
+        if member.status in ("administrator", "creator"):
+            bot_is_admin = True
+    except Exception as e:
+        log.warning("get_chat check warning for %s: %s", ch, e)
+
     s = await get_settings()
     chans = s.get("forced_channels") or []
     if ch not in chans:
@@ -2247,16 +2312,22 @@ async def _add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, ch: s
     global _settings_cache_time
     _settings_cache_time = 0
     await db.settings.update_one({"_id": "settings"}, {"$set": {"forced_channels": chans}}, upsert=True)
+
     clean = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
     if clean.endswith("bot"):
         msg = (
             f"✅ أُضيف البوت <b>{ch}</b> إلى الاشتراك الإجباري بنجاح!\n"
             f"ℹ️ سيطلب البوت من المستخدمين الدخول للبوت والضغط على ابدأ، ثم العودة وتأكيد التحقق."
         )
+    elif bot_is_admin:
+        msg = (
+            f"✅ أُضيف {chat_type} <b>{chat_title}</b> ({ch}) إلى الاشتراك الإجباري بنجاح!\n"
+            f"🛡 تم التأكد من أن البوت <b>مشرف (أدمن)</b> فيه وجاهز للتحقق من انضمام الأعضاء."
+        )
     else:
         msg = (
-            f"✅ أُضيفت القناة <b>{ch}</b> إلى الاشتراك الإجباري.\n"
-            f"⚠️ تأكّد أن البوت <b>أدمن</b> في القناة ليتمكن من التحقق التلقائي من اشتراك المستخدمين."
+            f"✅ أُضيف {chat_type} <b>{chat_title}</b> ({ch}) إلى الاشتراك الإجباري.\n\n"
+            f"⚠️ <b>تنبيه هام جداً:</b> البوت ليس مشرفاً حالياً داخل {chat_type}! تأكّد من رفع البوت <b>مشرفاً (أدمن)</b> داخل {chat_type} ليتمكن من فحص اشتراك المستخدمين."
         )
     await update.effective_message.reply_text(
         msg,
@@ -2317,44 +2388,25 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 
 async def _post_init(app: Application):
-    """Register multilingual Bot SEO and commands for global search ranking."""
-    for lang in i18n.SUPPORTED_LANGUAGES:
-        seo = i18n.BOT_SEO.get(lang, {})
-        cmds = i18n.BOT_COMMANDS.get(lang, [])
-        try:
-            if seo.get("name"):
-                await app.bot.set_my_name(name=seo["name"], language_code=lang)
-        except Exception as e:
-            log.warning("set_my_name failed for %s: %s", lang, e)
-        try:
-            if seo.get("short_description"):
-                await app.bot.set_my_short_description(short_description=seo["short_description"], language_code=lang)
-        except Exception as e:
-            log.warning("set_my_short_description failed for %s: %s", lang, e)
-        try:
-            if seo.get("description"):
-                await app.bot.set_my_description(description=seo["description"], language_code=lang)
-        except Exception as e:
-            log.warning("set_my_description failed for %s: %s", lang, e)
-        try:
-            if cmds:
-                await app.bot.set_my_commands(commands=cmds, language_code=lang)
-        except Exception as e:
-            log.warning("set_my_commands failed for %s: %s", lang, e)
-
-    # Fallback / Default SEO
-    try:
-        await app.bot.set_my_name(name=i18n.BOT_SEO["ar"]["name"])
-        await app.bot.set_my_short_description(short_description=i18n.BOT_SEO["ar"]["short_description"])
-        await app.bot.set_my_description(description=i18n.BOT_SEO["ar"]["description"])
-        await app.bot.set_my_commands(commands=i18n.BOT_COMMANDS["ar"])
-        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-        log.info("Multilingual SEO, commands, and standard menu button registered successfully.")
-    except Exception as e:
-        log.warning("Default SEO / menu setup failed: %s", e)
-
     init_db()
     await _preload_known_users()
+    try:
+        # Default scope: commands for all general users (NO /admin)
+        await app.bot.set_my_commands(commands=i18n.BOT_COMMANDS["ar"], scope=BotCommandScopeDefault())
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+        # Admin scope: commands strictly for authorized admin IDs (includes /admin and /broadcast)
+        for adm_id in ADMIN_IDS:
+            try:
+                await app.bot.set_my_commands(
+                    commands=i18n.ADMIN_COMMANDS["ar"],
+                    scope=BotCommandScopeChat(chat_id=adm_id)
+                )
+            except Exception as e_adm:
+                log.warning("Could not set admin commands for %s: %s", adm_id, e_adm)
+        log.info("Commands and menu button registered successfully (scoped).")
+    except Exception as e:
+        log.warning("Menu / commands registration notice: %s", e)
 
 
 def main():
@@ -2393,7 +2445,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(~filters.COMMAND, router))
 
-    app.job_queue.run_repeating(monitor_job, interval=max(INTERVAL * 60, 600), first=60)
+    app.job_queue.run_repeating(monitor_job, interval=90, first=15)
     app.job_queue.run_repeating(impersonation_job, interval=6 * 3600, first=300)
     app.job_queue.run_repeating(weekly_report_job, interval=7 * 24 * 3600, first=600)
 
