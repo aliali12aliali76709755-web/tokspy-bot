@@ -24,7 +24,7 @@ import time
 import urllib.request
 import logging
 from collections import deque
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import urllib.parse
 import json
 import re
@@ -33,6 +33,27 @@ import asyncio
 import httpx
 import pymongo
 import certifi
+import gc
+
+_SHARED_MONGO_CLIENT = None
+_SHARED_MONGO_DB = None
+
+def get_shared_mongo_db():
+    global _SHARED_MONGO_CLIENT, _SHARED_MONGO_DB
+    if _SHARED_MONGO_DB is None:
+        mongo_url = os.environ.get("MONGO_URL")
+        db_name = os.environ.get("DB_NAME", "bot_7933086359")
+        if mongo_url:
+            _SHARED_MONGO_CLIENT = pymongo.MongoClient(
+                mongo_url,
+                tlsCAFile=certifi.where(),
+                maxPoolSize=10,
+                minPoolSize=1,
+                maxIdleTimeMS=45000,
+                serverSelectionTimeoutMS=3000,
+            )
+            _SHARED_MONGO_DB = _SHARED_MONGO_CLIENT[db_name]
+    return _SHARED_MONGO_DB
 
 LOG_BUFFER = deque(maxlen=1000)
 
@@ -71,17 +92,14 @@ VISIT_QUEUE = queue.Queue()
 
 def visitor_flush_worker():
     """Worker thread that flushes visitor analytics to MongoDB periodically without blocking HTTP requests."""
-    mongo_url = os.environ.get("MONGO_URL")
-    db_name = os.environ.get("DB_NAME", "bot_7933086359")
-    if not mongo_url:
-        return
-    
-    col = None
+    last_gc = time.time()
     while True:
         try:
-            if col is None:
-                client = pymongo.MongoClient(mongo_url, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=5000)
-                col = client[db_name]["web_stats"]
+            db_shared = get_shared_mongo_db()
+            if db_shared is None:
+                time.sleep(2)
+                continue
+            col = db_shared["web_stats"]
 
             items = []
             try:
@@ -122,9 +140,12 @@ def visitor_flush_worker():
                         },
                         upsert=True
                     )
+            # Periodic garbage collection every 5 minutes to keep RAM usage minimal
+            if time.time() - last_gc > 300:
+                gc.collect()
+                last_gc = time.time()
         except Exception as e:
             root_logger.warning("visitor_flush_worker error: %s", e)
-            col = None
             time.sleep(2)
 
 
@@ -205,11 +226,9 @@ class HealthHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in ("/api/stats", "/stats"):
-            mongo_url = os.environ.get("MONGO_URL")
-            db_name = os.environ.get("DB_NAME", "bot_7933086359")
             try:
-                client = pymongo.MongoClient(mongo_url, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=2000)
-                doc = client[db_name]["web_stats"].find_one({"_id": "global"}) or {}
+                db_shared = get_shared_mongo_db()
+                doc = (db_shared["web_stats"].find_one({"_id": "global"}) if db_shared is not None else {}) or {}
                 doc["_id"] = str(doc.get("_id"))
                 res = {"ok": True, "stats": doc}
             except Exception as e:

@@ -82,8 +82,16 @@ db = None
 
 def init_db():
     global client, db
-    client = AsyncIOMotorClient(os.environ["MONGO_URL"], tlsCAFile=certifi.where(), maxPoolSize=100, minPoolSize=10)
-    db = client[os.environ["DB_NAME"]]
+    if client is None:
+        client = AsyncIOMotorClient(
+            os.environ["MONGO_URL"],
+            tlsCAFile=certifi.where(),
+            maxPoolSize=15,
+            minPoolSize=1,
+            maxIdleTimeMS=45000,
+            serverSelectionTimeoutMS=5000,
+        )
+        db = client[os.environ["DB_NAME"]]
     return db
 
 try:
@@ -91,9 +99,14 @@ try:
 except Exception:
     pass
 
-# High-load in-memory cache
+# High-load in-memory caches
 KNOWN_USERS: set[int] = set()
 LAST_START_TIMES: dict[int, float] = {}
+TELEGRAM_MEDIA_CACHE: dict[str, str] = {}  # post_id -> telegram file_id
+TELEGRAM_AUDIO_CACHE: dict[str, str] = {}  # video_id -> telegram file_id
+_ACTIVITY_CACHE: dict[int, float] = {}     # tid -> last DB write timestamp
+_ACTIVITY_PENDING_COUNTS: dict[int, int] = {} # tid -> pending activity counter
+_SUB_CACHE: dict[int, float] = {}          # tid -> subscription verification expiry
 
 USER_SAVE_SEM = None
 
@@ -160,12 +173,19 @@ async def _handle_referral(tid: int, arg: str, bot_instance):
 
 
 async def _touch_user_activity(tid: int):
+    """Throttle activity updates in memory and write to DB at most once per 5 minutes per user."""
+    t_now = time.time()
+    _ACTIVITY_PENDING_COUNTS[tid] = _ACTIVITY_PENDING_COUNTS.get(tid, 0) + 1
+    if t_now - _ACTIVITY_CACHE.get(tid, 0.0) < 300:
+        return
+    _ACTIVITY_CACHE[tid] = t_now
+    inc_count = _ACTIVITY_PENDING_COUNTS.pop(tid, 1)
     try:
         await db.users.update_one(
             {"telegram_id": tid},
             {
                 "$set": {"last_active": now().isoformat()},
-                "$inc": {"actions_count": 1}
+                "$inc": {"actions_count": inc_count}
             },
             upsert=True
         )
@@ -526,6 +546,38 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     tid = update.effective_user.id
     asyncio.create_task(_touch_user_activity(tid))
     wait = await update.effective_message.reply_text("⏳ جاري تحميل الفيديو بدون علامة مائية...")
+
+    # Fast path: check Telegram Media CDN cache (0 server CPU & 0 bandwidth)
+    m_pid = re.search(r'/(?:video|photo)/(\d+)', url)
+    cached_post_id = m_pid.group(1) if m_pid else None
+    cached_fid = TELEGRAM_MEDIA_CACHE.get(cached_post_id) if cached_post_id else None
+    cached_doc = None
+    if not cached_fid and cached_post_id:
+        try:
+            cached_doc = await db.media_cache.find_one({"post_id": cached_post_id})
+            if cached_doc and cached_doc.get("file_id"):
+                cached_fid = cached_doc["file_id"]
+                TELEGRAM_MEDIA_CACHE[cached_post_id] = cached_fid
+        except Exception:
+            pass
+
+    if cached_fid:
+        try:
+            await context.bot.delete_message(tid, wait.message_id)
+        except Exception:
+            pass
+        try:
+            cap_cached = (cached_doc.get("caption") if cached_doc else None) or "🎬 <b>تم تحميل الفيديو بدون علامة مائية</b>"
+            kb_cached = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎵 تنزيل الأغنية (MP3)", callback_data=f"dl_audio:{cached_post_id}")],
+            ]) if cached_post_id else None
+            await context.bot.send_video(
+                tid, video=cached_fid, caption=cap_cached, parse_mode=ParseMode.HTML, reply_markup=kb_cached
+            )
+            return
+        except Exception as e_cache:
+            log.info("Cached file_id expired, downloading fresh: %s", e_cache)
+
     data = await tk.download_video(url)
     try:
         await context.bot.delete_message(tid, wait.message_id)
@@ -578,7 +630,6 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
     bio = _clean_str(raw_bio) or "—"
     acc_id = (prof.get("id") if prof else None) or author.get("id") or "—"
 
-    # caption: strictly as user requested
     lines = [
         f"🎬 <b>منشور تيك توك</b>",
         f"👤 اسم الحساب: {F.esc(nickname)}",
@@ -591,14 +642,13 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
     cap = "\n".join(lines)
 
-
     rows = [
         [InlineKeyboardButton(f"👁 المشاهدات: {F.fmt_num(views)}", callback_data="noop")],
         [InlineKeyboardButton(f"❤️ الإعجابات: {F.fmt_num(likes)}", callback_data="noop")],
         [InlineKeyboardButton(f"💬 التعليقات: {F.fmt_num(comments)}", callback_data="noop")],
         [InlineKeyboardButton(f"🔖 الحفظ: {F.fmt_num(saves)}", callback_data="noop")],
         [InlineKeyboardButton(f"🔗 المشاركات: {F.fmt_num(shares)}", callback_data="noop")],
-                [InlineKeyboardButton(f"⬇️ التنزيلات: {F.fmt_num(downloads)}", callback_data="noop")]
+        [InlineKeyboardButton(f"⬇️ التنزيلات: {F.fmt_num(downloads)}", callback_data="noop")]
     ]
     music_url = (data.get("music_info") or {}).get("play") or data.get("music")
     video_id = data.get("id") or data.get("video_id")
@@ -611,50 +661,78 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
 
     imgs = data.get("images") or []
     if imgs:
-        media = []
+        # Offload photo fetching directly to Telegram CDN via direct URLs
+        media_urls = []
         for i, u in enumerate(imgs[:10]):
-            b = await _download_bytes(u)
-            item_media = b if b else u
             if i == 0:
-                media.append(InputMediaPhoto(media=item_media, caption=cap, parse_mode=ParseMode.HTML))
+                media_urls.append(InputMediaPhoto(media=u, caption=cap, parse_mode=ParseMode.HTML))
             else:
-                media.append(InputMediaPhoto(media=item_media))
+                media_urls.append(InputMediaPhoto(media=u))
         try:
-            if len(media) == 1:
-                await context.bot.send_photo(tid, photo=media[0].media, caption=cap, parse_mode=ParseMode.HTML)
+            if len(media_urls) == 1:
+                await context.bot.send_photo(tid, photo=media_urls[0].media, caption=cap, parse_mode=ParseMode.HTML)
             else:
-                await context.bot.send_media_group(tid, media=media)
+                await context.bot.send_media_group(tid, media=media_urls)
             await context.bot.send_message(tid, "📊 إحصائيات وأدوات المنشور:", reply_markup=kb)
-        except Exception as e:
-            log.warning("Failed to send slideshow media group: %s", e)
-            await update.effective_message.reply_text(
-                cap + f"\n\n⚠️ تعذّر تحميل الصور تلقائياً كملفات، إليك رابط أول صورة:\n{imgs[0]}",
-                parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True,
-            )
-        return
+            return
+        except Exception:
+            # Fallback to downloading bytes if Telegram is blocked from URL
+            media = []
+            for i, u in enumerate(imgs[:10]):
+                b = await _download_bytes(u)
+                item_media = b if b else u
+                if i == 0:
+                    media.append(InputMediaPhoto(media=item_media, caption=cap, parse_mode=ParseMode.HTML))
+                else:
+                    media.append(InputMediaPhoto(media=item_media))
+            try:
+                if len(media) == 1:
+                    await context.bot.send_photo(tid, photo=media[0].media, caption=cap, parse_mode=ParseMode.HTML)
+                else:
+                    await context.bot.send_media_group(tid, media=media)
+                await context.bot.send_message(tid, "📊 إحصائيات وأدوات المنشور:", reply_markup=kb)
+            except Exception as e:
+                log.warning("Failed to send slideshow media group: %s", e)
+                await update.effective_message.reply_text(
+                    cap + f"\n\n⚠️ تعذّر تحميل الصور تلقائياً كملفات، إليك رابط أول صورة:\n{imgs[0]}",
+                    parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True,
+                )
+            return
 
     video_path = data.get("video_path")
+    sent_msg = None
     try:
         if video_path and os.path.exists(video_path):
             with open(video_path, "rb") as vf:
-                await context.bot.send_video(
+                sent_msg = await context.bot.send_video(
                     tid, video=vf, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
                 )
         elif data.get("play"):
             try:
-                await context.bot.send_video(
+                sent_msg = await context.bot.send_video(
                     tid, video=data["play"], caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
                 )
             except Exception:
                 b = await _download_bytes(data["play"])
                 if b:
-                    await context.bot.send_video(
+                    sent_msg = await context.bot.send_video(
                         tid, video=b, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
                     )
                 else:
                     raise
         else:
             raise ValueError("No video source available")
+
+        # Offload future deliveries: save Telegram file_id to cache
+        if sent_msg and getattr(sent_msg, "video", None) and (data.get("id") or cached_post_id):
+            vid_file_id = sent_msg.video.file_id
+            v_key = str(data.get("id") or cached_post_id)
+            TELEGRAM_MEDIA_CACHE[v_key] = vid_file_id
+            asyncio.create_task(db.media_cache.update_one(
+                {"post_id": v_key},
+                {"$set": {"file_id": vid_file_id, "type": "video", "caption": cap, "saved_at": now().isoformat()}},
+                upsert=True
+            ))
     except Exception as e:
         log.warning("send_video error: %s", e)
         if data.get("play"):
@@ -665,6 +743,7 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
         else:
             await update.effective_message.reply_text("❌ تعذّر إرسال الفيديو.")
     finally:
+        import gc
         if video_path and os.path.exists(video_path):
             try:
                 os.remove(video_path)
@@ -677,6 +756,7 @@ async def do_download(update: Update, context: ContextTypes.DEFAULT_TYPE, url: s
                     shutil.rmtree(d, ignore_errors=True)
             except Exception:
                 pass
+        gc.collect()
 
 
 # ------------------------- text router -------------------------
@@ -953,25 +1033,54 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_notice(update, context)
 
     if action == "dl_audio":
-        # We need to answer the query immediately to show progress
-        await q.answer("⏳ جاري تحميل الأغنية كملف MP3...")
-        entry = await db.audio_cache.find_one({"video_id": arg})
+        await q.answer("⏳ جاري جلب ملف الأغنية...")
+        cached_afid = TELEGRAM_AUDIO_CACHE.get(arg)
+        entry = None
+        if not cached_afid:
+            entry = await db.audio_cache.find_one({"video_id": arg})
+            if entry and entry.get("file_id"):
+                cached_afid = entry["file_id"]
+                TELEGRAM_AUDIO_CACHE[arg] = cached_afid
+
+        title = (entry.get("title") if entry else None) or "TikTok Audio"
+        title = title[:45] + "..." if len(title) > 45 else title
+
+        # Fast path: instant re-delivery from Telegram CDN (0 server bandwidth)
+        if cached_afid:
+            try:
+                await context.bot.send_audio(
+                    chat_id=tid,
+                    audio=cached_afid,
+                    title=title,
+                    performer="TikTok",
+                )
+                return
+            except Exception as e_afid:
+                log.info("Cached audio file_id failed, re-downloading: %s", e_afid)
+
+        if not entry:
+            entry = await db.audio_cache.find_one({"video_id": arg})
         if not entry or not entry.get("music_url"):
             return await q.message.reply_text("❌ تعذّر العثور على رابط الأغنية.")
         url = entry["music_url"]
         b = await _download_bytes(url)
         if not b:
             return await q.message.reply_text("❌ فشل تنزيل ملف الأغنية. يرجى المحاولة لاحقاً.")
-        title = entry.get("title") or "TikTok Audio"
-        title = title[:45] + "..." if len(title) > 45 else title
         try:
-            await context.bot.send_audio(
+            sent_aud = await context.bot.send_audio(
                 chat_id=tid,
                 audio=b,
                 filename=f"audio_{arg}.mp3",
                 title=title,
                 performer="TikTok",
             )
+            if sent_aud and getattr(sent_aud, "audio", None) and sent_aud.audio.file_id:
+                new_afid = sent_aud.audio.file_id
+                TELEGRAM_AUDIO_CACHE[arg] = new_afid
+                asyncio.create_task(db.audio_cache.update_one(
+                    {"video_id": arg},
+                    {"$set": {"file_id": new_afid}}
+                ))
         except Exception as e:
             log.warning("Failed to send audio file: %s", e)
             await q.message.reply_text("❌ تعذّر إرسال ملف الأغنية كملف صوتي.")
@@ -1061,6 +1170,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chans = [c for c in (s.get("forced_channels") or []) if c != ch]
             global _settings_cache_time
             _settings_cache_time = 0
+            _SUB_CACHE.clear()
             await db.settings.update_one({"_id": "settings"}, {"$set": {"forced_channels": chans}}, upsert=True)
             return await q.message.reply_text(f"🗑 حُذفت {ch}.", reply_markup=admin_kb())
         return
@@ -1906,7 +2016,7 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
         mons = await db.monitors.find({}).to_list(10000)
         if not mons:
             return
-        sem = asyncio.Semaphore(15)  # Concurrency limit (keeps network responsive while scanning accounts fast)
+        sem = asyncio.Semaphore(5)  # Concurrency limit tuned for low CPU & stable network on cloud containers
 
         async def worker(m):
             async with sem:
@@ -1914,7 +2024,7 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.wait_for(_process_single_monitor(context, m), timeout=45.0)
                 except Exception as e:
                     log.warning("monitor job worker error for %s: %s", m.get("uniqueId"), e)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
 
         # Detached background execution ensures job runner never hangs
         async def _run_all():
@@ -1961,9 +2071,16 @@ async def ensure_subscribed(
     tid = update.effective_user.id
     if is_admin(tid):
         return True
+
+    t_now = time.time()
+    # Fast path: in-memory TTL cache (skip Telegram API get_chat_member and DB queries for 15 minutes)
+    if not is_checksub and _SUB_CACHE.get(tid, 0.0) > t_now:
+        return True
+
     s = await get_settings()
     chans = s.get("forced_channels") or []
     if not chans:
+        _SUB_CACHE[tid] = t_now + 900
         return True
 
     # Retrieve or initialize verified bots for this user
@@ -2009,6 +2126,7 @@ async def ensure_subscribed(
                 missing.append((ch, "channel", clean_ch))
 
     if not missing:
+        _SUB_CACHE[tid] = t_now + 900
         return True
 
     kb = []
@@ -2311,6 +2429,7 @@ async def _add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, ch: s
         chans.append(ch)
     global _settings_cache_time
     _settings_cache_time = 0
+    _SUB_CACHE.clear()
     await db.settings.update_one({"_id": "settings"}, {"$set": {"forced_channels": chans}}, upsert=True)
 
     clean = ch.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
@@ -2389,6 +2508,20 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 async def _post_init(app: Application):
     init_db()
+    try:
+        await asyncio.gather(
+            db.users.create_index("telegram_id", unique=True, background=True),
+            db.monitors.create_index([("telegram_id", 1), ("uniqueId", 1)], background=True),
+            db.monitors.create_index("uniqueId", background=True),
+            db.snapshots.create_index([("uniqueId", 1), ("ts", -1)], background=True),
+            db.audio_cache.create_index("video_id", unique=True, background=True),
+            db.media_cache.create_index("post_id", unique=True, background=True),
+            return_exceptions=True
+        )
+        log.info("MongoDB indexes verified / ensured.")
+    except Exception as e_idx:
+        log.warning("MongoDB index creation notice: %s", e_idx)
+
     await _preload_known_users()
     try:
         # Default scope: commands for all general users (NO /admin)
@@ -2414,7 +2547,7 @@ def main():
     asyncio.set_event_loop(loop)
     init_db()
     httpx_req = HTTPXRequest(
-        connection_pool_size=150,
+        connection_pool_size=30,
         pool_timeout=15.0,
         connect_timeout=5.0,
         read_timeout=30.0,
@@ -2445,7 +2578,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(~filters.COMMAND, router))
 
-    app.job_queue.run_repeating(monitor_job, interval=90, first=15)
+    app.job_queue.run_repeating(monitor_job, interval=180, first=15)
     app.job_queue.run_repeating(impersonation_job, interval=6 * 3600, first=300)
     app.job_queue.run_repeating(weekly_report_job, interval=7 * 24 * 3600, first=600)
 
